@@ -1161,12 +1161,43 @@ def measure_portfolio_risk(rows, returns_by_name):
     variance = float(weights.values @ covariance.values @ weights.values)
     portfolio_vol = sqrt(max(variance, 0)) * sqrt(TRADING_DAYS_PER_YEAR)
 
+    # --- Marginal contribution to risk -------------------------------------
+    # How much of the portfolio's total risk each holding is responsible for.
+    # This is NOT the same as its weight, and the difference is the point.
+    #
+    # The maths: for holding i, its marginal contribution is the i-th element of
+    # (C w) divided by portfolio volatility - how much total risk changes if you
+    # add a little more of it. Multiplying by the weight gives that holding's
+    # share of total risk, and those shares sum to exactly 100% by construction,
+    # which is what makes them comparable with the weights.
+    #
+    # A holding contributing more risk than its weight is doing so for one of two
+    # reasons: it is more volatile than average, or it moves in step with the rest
+    # of what you own. The second is the dangerous one, because it is invisible
+    # when you look at positions one at a time.
+    contributions = []
+    if variance > 0:
+        marginal = covariance.values @ weights.values          # C w
+        for position, name in enumerate(aligned.columns):
+            share = weights.values[position] * marginal[position] / variance * 100
+            weight_pct = weights.values[position] * 100
+            contributions.append({
+                "name": name,
+                "weight": weight_pct,
+                "share": share,
+                "vol_points": share / 100 * portfolio_vol,
+                # Above one means it carries more risk than its size suggests.
+                "ratio": share / weight_pct if weight_pct else None,
+            })
+        contributions.sort(key=lambda c: c["share"], reverse=True)
+
     return {
         "portfolio_vol": portfolio_vol,
         "weighted_avg_vol": weighted_average,
         "diversification": weighted_average - portfolio_vol,
         "correlations": aligned.corr(),
         "overlap_days": len(aligned),
+        "contributions": contributions,
     }
 
 
@@ -1953,6 +1984,39 @@ def build_portfolio_html(settings, rows, totals, problems):
             "lockstep</div></div>"
             "</div>"
         )
+
+    # Where the risk actually comes from.
+    contributions = totals.get("contributions")
+    if contributions:
+        body = []
+        for item in contributions:
+            ratio = item["ratio"]
+            if ratio is None:
+                flag, color = "", COLOR_NORMAL
+            elif ratio >= 1.3:
+                flag, color = "carries more risk than its size", COLOR_CAUTION
+            elif ratio <= 0.7:
+                flag, color = "calmer than its size", COLOR_CALM
+            else:
+                flag, color = "in line with its size", COLOR_NORMAL
+            body.append(
+                "<tr>"
+                f"<td class='tk'>{escape(item['name'])}</td>"
+                f"<td>{item['weight']:.1f}%</td>"
+                f"<td>{item['share']:.1f}%</td>"
+                f"<td>{item['vol_points']:.1f}pp</td>"
+                f"<td style='color:{color};font-weight:600'>"
+                f"{('x' + format(ratio, '.2f')) if ratio is not None else 'n/a'}</td>"
+                f"<td class='fine' style='color:{color}'>{flag}</td></tr>")
+        blocks.append(
+            "<h3 class='sub'>Where your risk actually comes from</h3>"
+            "<div class='table-scroll'><table><thead><tr><th>Holding</th>"
+            "<th>Share of money</th><th>Share of risk</th><th>Of total volatility</th>"
+            "<th>Risk vs size</th><th></th></tr></thead><tbody>"
+            + "".join(body) + "</tbody></table></div>"
+            "<p class='fine'>Shares of risk sum to 100%. A holding above 1.00 is "
+            "carrying more risk than its size implies - either because it is more "
+            "volatile, or because it moves with the rest of what you own.</p>")
 
     # The correlation grid: which holdings are genuinely different bets.
     correlations = totals.get("correlations")
