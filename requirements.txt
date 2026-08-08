@@ -1,0 +1,14 @@
+# The packages this project needs. GitHub installs these automatically before
+# running the script, using:  pip install -r requirements.txt
+#
+# No version numbers on purpose. yfinance depends on Yahoo's website, which
+# changes without warning; when it breaks, the fix arrives as a new yfinance
+# release. Pinning an exact version here would freeze the project on a broken
+# one. If an update ever breaks something instead, pin it then - e.g.
+# yfinance==1.5.2 - and note why.
+
+yfinance
+feedparser
+plotly
+pandas
+requests

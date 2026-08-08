@@ -1,0 +1,92 @@
+{
+  "_readme": [
+    "This is the ONLY file you maintain by hand. The script never edits it.",
+    "",
+    "HOW TO EDIT: each event is one block inside 'events' below. Copy an existing",
+    "block, change the fields, and keep the commas between blocks. Every piece of",
+    "text must sit inside double quotes. A missing comma or quote is the usual",
+    "cause of an error - if you break it, the script tells you which line.",
+    "",
+    "FIELDS:",
+    "  date       - YYYY-MM-DD. Past events disappear from the page automatically.",
+    "  name       - what the release is called.",
+    "  why        - why the release moves markets.",
+    "  if_higher  - what a hotter/stronger-than-expected number tends to mean.",
+    "  if_lower   - what a cooler/weaker-than-expected number tends to mean.",
+    "  verified   - false until YOU have checked the date against 'check_at'.",
+    "               Set it to true and the orange 'unconfirmed' tag disappears.",
+    "  check_at   - the official page that publishes the real date.",
+    "",
+    "IMPORTANT - WHY EVERYTHING SAYS verified: false",
+    "Claude's training data ends before these 2026 dates were published, so the",
+    "dates below are PATTERN-BASED ESTIMATES, not looked-up facts. They follow the",
+    "rules these agencies actually use (jobs report on the first Friday, CPI in the",
+    "second week, FOMC minutes exactly three weeks after the meeting). Check each",
+    "one against 'check_at' before you trust it. It takes about five minutes.",
+    "",
+    "The 2026-08-19 FOMC minutes date is the most reliable of these: the Fed's own",
+    "press feed shows the June 16-17 minutes published July 8 and the April 28-29",
+    "minutes published May 20 - exactly three weeks after each meeting - and the",
+    "July meeting ended July 29.",
+    "",
+    "Covers 2026-08-08 to 2026-09-07, plus the September FOMC decision, which falls",
+    "just outside that window but is too important to leave off."
+  ],
+
+  "events": [
+    {
+      "date": "2026-08-12",
+      "name": "CPI - Consumer Price Index (July data)",
+      "why": "The headline inflation number the public and the press react to. It is not the Fed's preferred gauge, but it is released earlier than PCE and reliably moves rates and equities on the day.",
+      "if_higher": "Inflation looks stickier than hoped. Markets push out expected rate cuts or price a greater chance of further tightening; Treasury yields typically rise, and long-duration assets such as technology usually fall hardest. Risk appetite normally weakens.",
+      "if_lower": "Disinflation looks on track. Expected policy easing is pulled forward, yields typically fall, and rate-sensitive and growth assets usually lead the rally.",
+      "verified": false,
+      "check_at": "https://www.bls.gov/schedule/news_release/cpi.htm"
+    },
+    {
+      "date": "2026-08-13",
+      "name": "PPI - Producer Price Index (July data)",
+      "why": "Prices at the factory gate rather than the till. It matters for two reasons: producer costs feed into consumer prices with a lag, and several PPI components feed directly into the PCE calculation, so forecasters revise their PCE estimates within minutes of its release.",
+      "if_higher": "Cost pressure is building upstream. Reinforces a hot CPI and raises expected PCE; usually pushes yields up. On its own it moves markets less than CPI.",
+      "if_lower": "Cost pressure is easing before it reaches consumers. Supports the disinflation case and tends to pull expected PCE down with it.",
+      "verified": false,
+      "check_at": "https://www.bls.gov/schedule/news_release/ppi.htm"
+    },
+    {
+      "date": "2026-08-19",
+      "name": "FOMC minutes (July 28-29 meeting)",
+      "why": "The statement tells you what the Committee decided; the minutes tell you how divided they were getting there. Markets read them for the spread of opinion and for the conditions officials named as triggers for changing course.",
+      "if_higher": "Read here as more hawkish than the statement implied - more members worried about inflation, or a higher bar for easing. Yields typically rise and equities soften.",
+      "if_lower": "Read here as more dovish - more concern about employment or growth, or a lower bar for easing. Supportive for both bonds and equities.",
+      "verified": false,
+      "check_at": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
+    },
+    {
+      "date": "2026-08-28",
+      "name": "PCE price index (July data)",
+      "why": "The Fed's preferred inflation measure, and specifically core PCE, which strips out food and energy. This is the number the Committee's own target is written in terms of, even though CPI generates the louder headlines. By release day much of it is already forecastable from CPI and PPI, so the surprise is usually smaller.",
+      "if_higher": "Inflation is running above the Fed's own yardstick. The most direct challenge to any easing case; yields typically rise.",
+      "if_lower": "Progress on the measure the Fed actually targets. Strengthens the case for easing more than a soft CPI does.",
+      "verified": false,
+      "check_at": "https://www.bea.gov/news/schedule"
+    },
+    {
+      "date": "2026-09-04",
+      "name": "Employment Situation - the jobs report (August data)",
+      "why": "Payrolls, the unemployment rate and average hourly earnings in one release. Usually the single largest scheduled mover of the month, because it speaks to both halves of the Fed's mandate at once.",
+      "if_higher": "Ambiguous by design, and worth understanding properly. A hot jobs number is good for company earnings but reduces the pressure on the Fed to ease - so in a market focused on rates, good news for the economy can be bad news for stocks. Which effect wins depends on what the market is currently most afraid of.",
+      "if_lower": "Also two-sided. A mild miss raises hopes of easing and equities often rally. A severe miss shifts the fear from inflation to recession, and then bonds rally while equities fall with them. Watch which one is happening.",
+      "verified": false,
+      "check_at": "https://www.bls.gov/schedule/news_release/empsit.htm"
+    },
+    {
+      "date": "2026-09-16",
+      "name": "FOMC interest rate decision + economic projections",
+      "why": "Falls just outside the next 30 days. The rate decision itself is usually priced in well beforehand, so the market reaction comes from three other things: the wording changes in the statement, the Summary of Economic Projections (the 'dot plot', published only at the March, June, September and December meetings), and the Chair's press conference. September is a projection meeting, so officials publish where they each expect rates to sit in future years.",
+      "if_higher": "A more hawkish outcome than priced - a higher dot plot, firmer statement language, or a Chair pushing back on easing expectations. Yields up, equities down, and typically a stronger dollar.",
+      "if_lower": "A more dovish outcome - a lower dot plot or softer language. Yields down and risk assets up, with the longest-duration assets moving most.",
+      "verified": false,
+      "check_at": "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
+    }
+  ]
+}

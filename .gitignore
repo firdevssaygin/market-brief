@@ -1,0 +1,13 @@
+# Files git should ignore - they never get recorded or uploaded.
+
+# Python's cache of compiled code. Regenerated automatically; never useful to keep.
+__pycache__/
+*.pyc
+
+# macOS drops these invisible files into every folder you open in Finder.
+.DS_Store
+
+# A virtual environment, if you ever add one. Packages get reinstalled from
+# requirements.txt instead, so there is no reason to store them.
+.venv/
+venv/
