@@ -1256,8 +1256,20 @@ def measure_portfolio_risk(rows, returns_by_name):
     tail = daily[daily <= var_95]
     shortfall = float(tail.mean()) if not tail.empty else None
 
+    # Period returns: what today's holdings did over the last day, week and
+    # month. Compounding the daily returns is the correct way to add them up -
+    # a 10% gain then a 10% loss is not zero.
+    def compound(window):
+        if len(daily) < window:
+            return None
+        recent = daily.iloc[-window:] / 100 + 1
+        return (float(recent.prod()) - 1) * 100
+
+    periods = {"1 day": compound(1), "1 week": compound(5), "1 month": compound(21)}
+
     return {
         "daily": daily,
+        "periods": periods,
         "worst_day": worst_value,
         "worst_date": worst_date,
         "best_day": float(daily.max()),
@@ -2177,60 +2189,47 @@ def build_portfolio_html(settings, rows, totals, problems):
         "</tr></thead><tbody>" + "".join(body) + "</tbody></table></div>"
     )
 
-    # Portfolio risk: the part no broker shows you.
+    # How it is doing. This is the question asked every morning, so it comes
+    # first and in the plainest form available: percent, and money.
+    periods = totals.get("periods") or {}
+    tiles = []
+    for label, pct in periods.items():
+        if pct is None:
+            continue
+        colour = COLOR_CALM if pct >= 0 else COLOR_STRESSED
+        amount = abs(pct) / 100 * totals["value"]
+        tiles.append(
+            f"<div class='tile' style='border-top:3px solid {colour}'>"
+            f"<div class='tile-label'>{escape(label)}</div>"
+            f"<div class='tile-value' style='color:{colour}'>{format_change(pct)}</div>"
+            f"<div class='tile-detail'>{'+' if pct >= 0 else '-'}"
+            f"{money(amount, currency)}</div></div>")
+
+    overall = totals["profit_pct"]
+    if overall is not None:
+        colour = COLOR_CALM if overall >= 0 else COLOR_STRESSED
+        tiles.append(
+            f"<div class='tile' style='border-top:3px solid {colour}'>"
+            "<div class='tile-label'>Since you bought</div>"
+            f"<div class='tile-value' style='color:{colour}'>{format_change(overall)}</div>"
+            f"<div class='tile-detail'>{'+' if totals['profit'] >= 0 else '-'}"
+            f"{money(abs(totals['profit']), currency)}</div></div>")
+
     if totals.get("portfolio_vol") is not None:
-        saved = totals["diversification"]
-        blocks.append(
-            "<div class='tile-grid' style='margin-top:20px'>"
+        tiles.append(
             "<div class='tile'>"
-            "<div class='tile-label'>Portfolio volatility</div>"
-            f"<div class='tile-value'>{totals['portfolio_vol']:.1f}%</div>"
-            "<div class='tile-detail'>annualised, from how your holdings actually "
-            "move together</div></div>"
-            "<div class='tile'>"
-            "<div class='tile-label'>If they moved as one</div>"
-            f"<div class='tile-value'>{totals['weighted_avg_vol']:.1f}%</div>"
-            "<div class='tile-detail'>the weighted average of each holding's own "
-            "volatility</div></div>"
-            "<div class='tile'>"
-            "<div class='tile-label'>Diversification benefit</div>"
-            f"<div class='tile-value' style='color:{COLOR_CALM}'>{saved:.1f}pp</div>"
-            "<div class='tile-detail'>volatility removed by not moving in "
-            "lockstep</div></div>"
-            "</div>"
-        )
+            "<div class='tile-label'>Volatility</div>"
+            f"<div class='tile-value'>{totals['portfolio_vol']:.0f}%</div>"
+            "<div class='tile-detail'>annualised, from how your holdings move "
+            "together</div></div>")
 
-    # What a bad day costs, in money.
-    if totals.get("var_95") is not None:
-        value = totals["value"]
-        currency = totals["currency"]
-
-        def money_at(pct):
-            return money(abs(pct) / 100 * value, currency)
-
-        blocks.append(
-            "<div class='tile-grid' style='margin-top:20px'>"
-            "<div class='tile' style='border-top:3px solid " + COLOR_CAUTION + "'>"
-            "<div class='tile-label'>Typical bad day (95% VaR)</div>"
-            f"<div class='tile-value'>{money_at(totals['var_95'])}</div>"
-            f"<div class='tile-detail'>{format_change(totals['var_95'])} &middot; "
-            "one day in twenty is at least this bad</div></div>"
-            "<div class='tile' style='border-top:3px solid " + COLOR_STRESSED + "'>"
-            "<div class='tile-label'>Once it is bad (expected shortfall)</div>"
-            f"<div class='tile-value'>{money_at(totals['shortfall'])}</div>"
-            f"<div class='tile-detail'>{format_change(totals['shortfall'])} &middot; "
-            "the average of those worst days</div></div>"
-            "<div class='tile' style='border-top:3px solid " + COLOR_STRESSED + "'>"
-            "<div class='tile-label'>Worst day in the sample</div>"
-            f"<div class='tile-value'>{money_at(totals['worst_day'])}</div>"
-            f"<div class='tile-detail'>{format_change(totals['worst_day'])} &middot; "
-            f"{totals['worst_date']}</div></div>"
-            "</div>"
-            f"<p class='fine'>Today's holdings applied to the last "
-            f"{totals['sample_days']} trading days on which all of them traded. "
-            f"For scale, your best day on the same basis was "
-            f"{format_change(totals['best_day'])}.</p>"
-        )
+    if tiles:
+        blocks.append("<div class='tile-grid' style='margin-top:20px'>"
+                      + "".join(tiles) + "</div>"
+                      "<p class='fine'>Day, week and month are today's holdings "
+                      "applied to recent prices - what this portfolio did, not what "
+                      "your account did, since you may have bought during the period. "
+                      "'Since you bought' uses your actual average cost.</p>")
 
     # Where the risk actually comes from.
     contributions = totals.get("contributions")
@@ -2644,7 +2643,6 @@ LEARN_ORDER = [
     ("correlation", "Rolling correlation with yields"),
     ("portfolio", "Portfolio volatility and diversification"),
     ("factors", "Factor decomposition"),
-    ("drawdown", "Value-at-risk and expected shortfall"),
     ("earnings", "Why earnings dates matter"),
     ("calendar", "Economic releases"),
     ("bars", "Reading the daily move chart"),
@@ -2699,16 +2697,21 @@ def build_home_summary(totals, composite, earnings, today):
             f"<div class='tile-detail'>{money(totals['value_other'], totals['other_currency'])}</div>"
             f"<div class='tile-reading'><span class='reading' style='color:{colour}'>"
             f"{'+' if profit >= 0 else '-'}{money(abs(profit), totals['currency'])} "
-            f"({format_change(totals['profit_pct'])})</span></div></div>")
+            f"({format_change(totals['profit_pct'])}) since you bought</span></div></div>")
 
-        if totals.get("var_95") is not None:
+        # Today's move gets its own tile: it is the number checked most often,
+        # and burying it inside the lifetime figure hides the thing you came for.
+        today_move = (totals.get("periods") or {}).get("1 day")
+        if today_move is not None:
+            colour = COLOR_CALM if today_move >= 0 else COLOR_STRESSED
             tiles.append(
-                f"<div class='tile' style='border-top:3px solid {COLOR_CAUTION}'>"
-                "<div class='tile-label'>A bad day costs</div>"
-                f"<div class='tile-value'>"
-                f"{money(abs(totals['var_95']) / 100 * totals['value'], totals['currency'])}</div>"
-                f"<div class='tile-detail'>{format_change(totals['var_95'])}, "
-                "one day in twenty</div></div>")
+                f"<div class='tile' style='border-top:3px solid {colour}'>"
+                "<div class='tile-label'>Portfolio today</div>"
+                f"<div class='tile-value' style='color:{colour}'>"
+                f"{format_change(today_move)}</div>"
+                f"<div class='tile-detail'>{'+' if today_move >= 0 else '-'}"
+                f"{money(abs(today_move) / 100 * totals['value'], totals['currency'])}"
+                "</div></div>")
 
     if earnings:
         soonest = earnings[0]
