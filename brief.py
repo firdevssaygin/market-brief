@@ -37,6 +37,7 @@ A NOTE FOR THE R USER
   you combine them. That is powerful and it is also a trap; see dated_series().
 """
 
+import io                         # lets pandas read text as if it were a file
 import json                       # reads calendar.json
 import sys                        # lets the script report failure to GitHub
 from datetime import date, datetime, timedelta
@@ -109,8 +110,13 @@ FEED_TIMEOUT_SECONDS = 20
 CALENDAR_PATH = Path(__file__).parent / "calendar.json"
 CALENDAR_EVENTS_SHOWN = 6
 
-# Your holdings, the other file you maintain by hand.
+# Your holdings. Two possible sources.
+#
+# If POSITIONS_CSV_URL is filled in, the holdings are read from a published
+# Google Sheet, so you can edit them from a phone without touching GitHub. If it
+# is left empty, positions.json is used instead. The sheet wins when both exist.
 POSITIONS_PATH = Path(__file__).parent / "positions.json"
+POSITIONS_CSV_URL = ""
 
 # --- Risk regime -----------------------------------------------------------
 # Four free indicators that describe the environment rather than any one fund.
@@ -741,6 +747,114 @@ def position_currency(symbol):
     produce a total that means nothing at all.
     """
     return "TRY" if symbol.upper().endswith(".IS") else "USD"
+
+
+def parse_number(value):
+    """Read a number written in either English or Turkish notation.
+
+    A spreadsheet exports numbers the way its locale writes them. An English
+    sheet gives 0.0125; a Turkish one gives 0,0125 and separates columns with
+    semicolons instead of commas. Getting this wrong would not raise an error -
+    it would silently value a holding at twelve thousand times its real price -
+    so both are handled and the parsed figures are printed to the terminal for
+    checking.
+
+    A lone comma is treated as a decimal point, because that is the Turkish
+    convention. Thousands separators are therefore not supported: write 50000,
+    not 50.000 or 50,000.
+    """
+    if value is None:
+        return None
+    text = str(value).strip().replace(" ", "").replace(" ", "")
+    if not text:
+        return None
+
+    if "," in text and "." in text:
+        # Whichever separator comes last is the decimal point.
+        if text.rfind(",") > text.rfind("."):
+            text = text.replace(".", "").replace(",", ".")
+        else:
+            text = text.replace(",", "")
+    elif "," in text:
+        text = text.replace(",", ".")
+
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def positions_from_csv(text):
+    """Turn published-spreadsheet CSV into holdings, with readable complaints."""
+    try:
+        # sep=None asks pandas to work out the separator itself, which covers
+        # both comma-separated and semicolon-separated exports.
+        frame = pd.read_csv(io.StringIO(text), sep=None, engine="python")
+    except Exception as error:
+        return [], [f"could not read the sheet as a table: {type(error).__name__}"]
+
+    # Tolerate capitals, spaces and stray blanks in the header row.
+    frame.columns = [str(c).strip().lower().replace(" ", "_") for c in frame.columns]
+
+    required = ["symbol", "quantity", "buy_date", "buy_price"]
+    missing = [column for column in required if column not in frame.columns]
+    if missing:
+        return [], [
+            f"the sheet is missing these columns: {', '.join(missing)}. "
+            f"It needs a header row reading: name, symbol, quantity, buy_date, "
+            f"buy_price, where. Found instead: {', '.join(frame.columns)}"
+        ]
+
+    problems = []
+    holdings = []
+    for position, row in enumerate(frame.to_dict("records"), start=2):  # row 1 is the header
+        symbol = str(row.get("symbol", "")).strip()
+        if not symbol or symbol.lower() == "nan":
+            continue  # blank rows at the bottom of a sheet are normal
+
+        quantity = parse_number(row.get("quantity"))
+        buy_price = parse_number(row.get("buy_price"))
+        buy_date = str(row.get("buy_date", "")).strip()[:10]
+
+        if quantity is None or buy_price is None:
+            problems.append(f"row {position} ({symbol}): quantity or buy_price is not a number")
+            continue
+        try:
+            date.fromisoformat(buy_date)
+        except ValueError:
+            problems.append(
+                f"row {position} ({symbol}): buy_date '{buy_date}' is not YYYY-MM-DD. "
+                f"Format that column as plain text in the sheet if the date keeps changing shape."
+            )
+            continue
+
+        name = str(row.get("name", "") or symbol).strip()
+        holdings.append({
+            "name": name if name.lower() != "nan" else symbol,
+            "symbol": symbol,
+            "quantity": quantity,
+            "buy_price": buy_price,
+            "buy_date": buy_date,
+            "where": str(row.get("where", "") or "").replace("nan", ""),
+            "currency": position_currency(symbol),
+        })
+
+    return holdings, problems
+
+
+def load_positions_from_sheet(url):
+    """Download the published sheet and parse it."""
+    try:
+        response = requests.get(url, timeout=FEED_TIMEOUT_SECONDS)
+        response.raise_for_status()
+    except requests.RequestException as error:
+        return [], [
+            f"could not download the holdings sheet: {str(error)[:120]}. "
+            f"Check that it is still published (File > Share > Publish to web)."
+        ]
+    # Google serves the CSV as UTF-8; being explicit avoids mangled Turkish letters.
+    response.encoding = "utf-8"
+    return positions_from_csv(response.text)
 
 
 def load_positions(path):
@@ -2053,6 +2167,14 @@ def main():
 
     print("Reading positions.json...")
     settings, holdings, position_problems = load_positions(POSITIONS_PATH)
+    if POSITIONS_CSV_URL:
+        # The sheet is the live source when one is configured; positions.json is
+        # then only used for the reporting-currency setting.
+        holdings, position_problems = load_positions_from_sheet(POSITIONS_CSV_URL)
+        print(f"  holdings source: published sheet ({len(holdings)} rows read)")
+        for holding in holdings:
+            print(f"    {holding['symbol']:10} qty={holding['quantity']:<12g} "
+                  f"paid={holding['buy_price']:<12g} on {holding['buy_date']}")
     for problem in position_problems:
         print(f"POSITIONS: {problem}")
     portfolio_rows, portfolio_totals, pricing_problems = build_portfolio(settings, holdings)
