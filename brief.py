@@ -358,6 +358,18 @@ EXPLANATIONS = {
         "spread and tax, so it is the gross figure, not what you would actually "
         "walk away with."
     ),
+    "earnings": (
+        "Results day is the most reliable single-stock event there is: the date is "
+        "known in advance, and the move is often larger than anything else that "
+        "happens to the share all quarter. What moves the price is not whether "
+        "profits were good but whether they beat what analysts already expected - "
+        "the estimate range shown here is what is already in the price, so a strong "
+        "quarter that merely meets it typically does nothing at all. "
+        "Guidance for the next quarter frequently matters more than the results "
+        "being reported. And these dates are Yahoo's expected ones: companies move "
+        "them, occasionally at a few days' notice, so confirm with the company "
+        "before doing anything that depends on the exact day."
+    ),
     "journal": (
         "The only panel here that improves your judgment rather than your "
         "information. You write down what you expect <b>before</b> you find out, "
@@ -2229,6 +2241,73 @@ def holdings_mentioned(title, rows):
     return sorted(set(found))
 
 
+def fetch_earnings(rows):
+    """Next reporting date for each share you hold, with the analyst estimate.
+
+    Only shares have earnings, so crypto, cash and commodities are skipped.
+    Yahoo's date is the EXPECTED one - companies move them, sometimes at short
+    notice - so it is labelled as expected on the page rather than presented as
+    fixed.
+    """
+    today = datetime.now(TIMEZONE).date()
+    found = []
+    for row in rows:
+        if row["kind"] != "stock":
+            continue
+        try:
+            calendar = yf.Ticker(row["symbol"]).calendar
+        except Exception:
+            continue
+        if not isinstance(calendar, dict):
+            continue
+        dates = calendar.get("Earnings Date") or []
+        if not dates:
+            continue
+        when = dates[0]
+        low, high = calendar.get("Earnings Low"), calendar.get("Earnings High")
+        found.append({
+            "name": row["name"], "symbol": row["symbol"], "weight": row["weight"],
+            "date": when, "days": (when - today).days,
+            "low": low, "high": high,
+        })
+    found.sort(key=lambda e: e["date"])
+    return found
+
+
+def build_earnings_html(earnings):
+    """Upcoming results for your holdings, soonest first."""
+    if not earnings:
+        return ("<p class='awaiting'>No earnings dates available. Only shares report "
+                "results, so this stays empty if you hold none.</p>")
+
+    tiles = []
+    for item in earnings:
+        # Anything inside a fortnight is worth flagging; inside a week, loudly.
+        if item["days"] < 0:
+            colour, when = COLOR_NORMAL, "date has passed - Yahoo may not have updated"
+        elif item["days"] <= 7:
+            colour, when = COLOR_STRESSED, f"in {item['days']} days"
+        elif item["days"] <= 14:
+            colour, when = COLOR_CAUTION, f"in {item['days']} days"
+        else:
+            colour, when = COLOR_NORMAL, f"in {item['days']} days"
+
+        estimate = ""
+        if item["low"] is not None and item["high"] is not None:
+            estimate = (f"<div class='tile-detail'>analysts expect "
+                        f"{item['low']:.2f} to {item['high']:.2f} per share</div>")
+
+        tiles.append(
+            f"<div class='tile' style='border-top:3px solid {colour}'>"
+            f"<div class='tile-label'>{escape(item['name'])} &middot; "
+            f"{item['weight']:.0f}% of portfolio</div>"
+            f"<div class='tile-value' style='font-size:24px'>{item['date']}</div>"
+            f"<div class='tile-reading'><span class='reading' style='color:{colour}'>"
+            f"{when}</span></div>{estimate}</div>"
+        )
+    return "<div class='tile-grid'>" + "".join(tiles) + "</div>"
+
+
 def build_headlines_html(feeds, rows):
     """One card per source, each a list of headlines that link out.
 
@@ -2396,7 +2475,7 @@ def build_correlation_hero(correlation):
 def render_page(rows, risk_rows, yield_data, correlation, bar_html, trend_html,
                 correlation_html, headlines_html, calendar_html, regime_html,
                 curve_html, watcher_html, watcher_chart, portfolio_html,
-                tv_chart, tv_calendar, journal_html, as_of):
+                tv_chart, tv_calendar, journal_html, earnings_html, as_of):
     """Assemble every piece into one HTML file and save it."""
     generated = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M")
     bar_label = BAR_LABELS[BAR_COLUMN]
@@ -2529,6 +2608,12 @@ def render_page(rows, risk_rows, yield_data, correlation, bar_html, trend_html,
 
 
 </div><div class="panel" id="panel-calendar">
+
+<section class="card">
+  <h2>Earnings &mdash; your holdings</h2>
+  {earnings_html}
+  <p class="note"><b>Why results day matters.</b> {EXPLANATIONS['earnings']}</p>
+</section>
 
 <section class="card">
   <h2>Upcoming US releases</h2>
@@ -2699,6 +2784,11 @@ def main():
     for problem in pricing_problems:
         print(f"POSITIONS: {problem}")
 
+    print("Checking earnings dates...")
+    earnings = fetch_earnings(portfolio_rows)
+    for item in earnings:
+        print(f"  {item['symbol']:6} {item['date']}  in {item['days']} days")
+
     print("Reading the decision journal...")
     journal_entries, journal_problems = load_journal()
     journal_resolved, journal_open = score_journal(
@@ -2743,6 +2833,7 @@ def main():
         curve_html=build_curve_chart(curve_series),
         watcher_html=build_watcher_html(composite, scores),
         watcher_chart=build_watcher_chart(composite),
+        earnings_html=build_earnings_html(earnings),
         journal_html=build_journal_html(journal_entries, journal_resolved,
                                         journal_open, journal_problems),
         tv_chart=build_tradingview_chart(portfolio_rows),
