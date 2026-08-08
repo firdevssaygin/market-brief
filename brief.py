@@ -38,6 +38,7 @@ A NOTE FOR THE R USER
 """
 
 import json                       # reads calendar.json
+import sys                        # lets the script report failure to GitHub
 from datetime import date, datetime, timedelta
 from html import escape           # makes outside text safe to place in a web page
 from math import sqrt
@@ -1162,6 +1163,15 @@ def main():
     failed = [t for t, r in zip(TICKERS, rows) if r is None]
     if failed:
         print(f"WARNING: no data returned for {', '.join(failed)}")
+
+    # If EVERY download failed, stop rather than publish a page of "n/a". When
+    # this script runs unattended at six in the morning, a loud failure that
+    # leaves yesterday's good page in place beats a silent one that replaces it
+    # with an empty one. sys.exit(1) is how a program reports failure: zero
+    # means success, anything else means trouble, and GitHub watches for it.
+    if all(row is None for row in rows):
+        print("ERROR: no price data at all - refusing to publish an empty page.")
+        sys.exit(1)
 
     yield_data = fetch_yield()
 

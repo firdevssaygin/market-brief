@@ -1,0 +1,66 @@
+# Tells GitHub to run brief.py on a schedule and publish the result.
+#
+# This file must live at exactly .github/workflows/ - GitHub only looks there.
+# The format is YAML, where indentation carries meaning: the number of spaces at
+# the start of a line decides what belongs to what. Use spaces, never tabs.
+
+name: Publish market brief
+
+# "on" means: when should this run?
+on:
+  schedule:
+    # Cron format: minute hour day-of-month month day-of-week
+    #              0      3    *            *     1-5
+    # so: at 03:00, any day of the month, any month, Monday to Friday.
+    #
+    # GitHub reads these times as UTC and offers no timezone setting. Istanbul is
+    # UTC+3 all year - Turkey stopped changing its clocks in 2016 - so 03:00 UTC
+    # is 06:00 in Istanbul, in summer and winter alike. Somewhere with daylight
+    # saving would drift by an hour twice a year and need this line edited.
+    - cron: "0 3 * * 1-5"
+
+  # Adds a "Run workflow" button on the Actions tab, so you can trigger a run
+  # yourself instead of waiting until tomorrow morning.
+  workflow_dispatch:
+
+# By default a job may only read the repository. Writing the rebuilt page back
+# requires asking for permission explicitly.
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    # A fresh, empty Linux machine, created for this run and destroyed after.
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get the repository
+        uses: actions/checkout@v4
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip          # remembers downloaded packages, so later runs are quicker
+
+      - name: Install the packages
+        run: pip install -r requirements.txt
+
+      # If brief.py fails - for instance every price download returns nothing -
+      # it exits with an error, this step goes red, and the steps below never
+      # run. Yesterday's good page stays published rather than being replaced
+      # by a broken one.
+      - name: Build the page
+        run: python brief.py
+
+      - name: Publish it, if anything changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/index.html
+          if git diff --staged --quiet; then
+            echo "The page is identical to the published one - nothing to do."
+          else
+            git commit -m "Update market brief for $(date -u +'%Y-%m-%d')"
+            git push
+          fi
