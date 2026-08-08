@@ -1,46 +1,82 @@
 {
   "_readme": [
-    "YOUR HOLDINGS. Empty on purpose - nothing here is invented.",
+    "YOUR HOLDINGS - derived from your Midas and OKX screenshots on 2026-08-08.",
     "",
-    "The symbols below in _watchlist are the ones from your TradingView Portfolio",
-    "list, already checked against Yahoo. They are NOT holdings: a watchlist says",
-    "what you are watching, not what you own, how much of it, or what you paid.",
-    "Until quantity, buy_date and buy_price come from you, no portfolio figure can",
-    "be computed, and the dashboard will say so rather than show a number.",
+    "quantity and buy_price were reconstructed from the value, current price and",
+    "profit-percentage each broker displayed. The arithmetic reproduces Midas's",
+    "stated total of $1,167.72 and -$71.36 (-5.76%) to the cent, and OKX's figures",
+    "were read after switching its display currency to USD, so no exchange-rate",
+    "assumption was needed anywhere.",
     "",
-    "SYMBOL MAPPING - TradingView writes these differently from Yahoo:",
-    "  TradingView   ->  Yahoo        what it is",
-    "  AMD           ->  AMD          US stock",
-    "  MP            ->  MP           US stock",
-    "  LITE          ->  LITE         US stock",
-    "  CHZUSDT       ->  CHZ-USD      crypto: USDT pairs become -USD",
-    "  INJUSDT       ->  INJ-USD      crypto",
-    "  XAUUSD        ->  GC=F         gold. Yahoo has no spot gold feed, so this is",
-    "                                 the futures price, normally a few dollars",
-    "                                 above spot. Use GLD if you hold the ETF.",
-    "  BIST:THYAO    ->  THYAO.IS     Borsa Istanbul, if you add Turkish shares",
+    "buy_price is an AVERAGE across all your fills. Because you buy piecewise with",
+    "limit orders, that average is exactly what the broker's percentage already",
+    "encodes - so no per-order records are needed.",
     "",
-    "TO ADD A HOLDING, copy this shape into the positions list:",
-    "  {",
-    "    \"name\": \"AMD\",",
-    "    \"symbol\": \"AMD\",",
-    "    \"quantity\": 0,",
-    "    \"buy_date\": \"2026-01-01\",",
-    "    \"buy_price\": 0,",
-    "    \"where\": \"Midas\"",
-    "  }",
-    "buy_price is what you paid PER SHARE OR COIN, in that market's own currency:",
-    "dollars for AMD and CHZ-USD, lira for anything ending .IS. Mixed currencies are",
-    "converted at the live USD/TRY rate before being added up.",
+    "buy_date is absent on purpose: it cannot be recovered from a screenshot, and it",
+    "affects no profit or risk figure. It is optional.",
     "",
-    "reporting_currency is \"USD\" or \"TRY\" - it changes how totals are displayed,",
-    "never what you own."
+    "This file is the source until POSITIONS_CSV_URL in brief.py is filled in with a",
+    "published Google Sheet, after which the sheet takes over and you can edit from",
+    "a phone."
   ],
-
   "is_example": false,
   "reporting_currency": "USD",
-
-  "_watchlist": ["AMD", "MP", "LITE", "CHZ-USD", "INJ-USD", "GC=F"],
-
-  "positions": []
+  "positions": [
+    {
+      "name": "MP Materials",
+      "symbol": "MP",
+      "quantity": 5.9826,
+      "buy_price": 66.858891,
+      "type": "stock",
+      "where": "Midas"
+    },
+    {
+      "name": "AMD",
+      "symbol": "AMD",
+      "quantity": 0.8,
+      "buy_price": 487.1,
+      "type": "stock",
+      "where": "Midas"
+    },
+    {
+      "name": "Lumentum",
+      "symbol": "LITE",
+      "quantity": 0.528,
+      "buy_price": 851.136364,
+      "type": "stock",
+      "where": "Midas"
+    },
+    {
+      "name": "Tether",
+      "symbol": "USDT-USD",
+      "quantity": 673.04642206,
+      "buy_price": 0.999188,
+      "type": "cash",
+      "where": "OKX"
+    },
+    {
+      "name": "Injective",
+      "symbol": "INJ-USD",
+      "quantity": 105.38292004,
+      "buy_price": 5.723793,
+      "type": "crypto",
+      "where": "OKX"
+    },
+    {
+      "name": "Tether Gold",
+      "symbol": "XAUT-USD",
+      "quantity": 0.08354523,
+      "buy_price": 4317.182441,
+      "type": "commodity",
+      "where": "OKX"
+    },
+    {
+      "name": "Chiliz",
+      "symbol": "CHZ-USD",
+      "quantity": 7489.9694331,
+      "buy_price": 0.028824,
+      "type": "crypto",
+      "where": "OKX"
+    }
+  ]
 }
