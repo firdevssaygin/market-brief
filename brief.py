@@ -383,6 +383,23 @@ EXPLANATIONS = {
         "moves nothing, and guidance for the next quarter often matters more than "
         "the results being reported."
     ),
+    "drawdown": (
+        "Volatility is an average; these are the numbers that describe the bad end "
+        "of the distribution, which is the end that empties accounts. "
+        "<b>Value-at-risk</b> is the 5th percentile of daily outcomes: on the worst "
+        "one day in twenty, you lose at least this much. Note <i>at least</i> - VaR "
+        "marks where the tail begins and says nothing about how far it runs, which "
+        "is exactly the property that made it dangerous in 2008 when institutions "
+        "reported it as though it were a worst case. <b>Expected shortfall</b> fixes "
+        "that by averaging the losses beyond it: not where the bad days start, but "
+        "how bad they are once you are in one. Regulators moved toward it afterwards "
+        "for that reason. "
+        "Two limits. Both are computed from days that actually happened, so neither "
+        "can describe a day worse than any in the sample - and market history "
+        "reliably produces days worse than the previous worst. And this applies "
+        "today's holdings to past returns; it is what this portfolio would have "
+        "done, not what yours did."
+    ),
     "journal": (
         "The only panel here that improves your judgment rather than your "
         "information. You write down what you expect <b>before</b> you find out, "
@@ -1191,7 +1208,33 @@ def measure_portfolio_risk(rows, returns_by_name):
             })
         contributions.sort(key=lambda c: c["share"], reverse=True)
 
+    # --- What a bad day looks like -----------------------------------------
+    # Apply today's weights to every past day's returns. This is a "what if I
+    # had held exactly this" calculation, not a record of what your portfolio
+    # actually did - you did not hold these weights a year ago. It is the right
+    # question anyway, because the position you care about is the one you hold now.
+    daily = aligned @ weights.values
+    worst_value = float(daily.min())
+    worst_date = daily.idxmin().date()
+
+    # Historical value-at-risk: the 5th percentile of daily outcomes. On the
+    # worst one day in twenty, you lost at least this much.
+    var_95 = float(daily.quantile(0.05))
+
+    # Expected shortfall: the AVERAGE of those worst 5% of days. VaR tells you
+    # where the bad tail starts; expected shortfall tells you how bad it is once
+    # you are in it, which is the more useful of the two and the one regulators
+    # moved to after 2008.
+    tail = daily[daily <= var_95]
+    shortfall = float(tail.mean()) if not tail.empty else None
+
     return {
+        "worst_day": worst_value,
+        "worst_date": worst_date,
+        "best_day": float(daily.max()),
+        "var_95": var_95,
+        "shortfall": shortfall,
+        "sample_days": len(daily),
         "portfolio_vol": portfolio_vol,
         "weighted_avg_vol": weighted_average,
         "diversification": weighted_average - portfolio_vol,
@@ -1985,6 +2028,38 @@ def build_portfolio_html(settings, rows, totals, problems):
             "</div>"
         )
 
+    # What a bad day costs, in money.
+    if totals.get("var_95") is not None:
+        value = totals["value"]
+        currency = totals["currency"]
+
+        def money_at(pct):
+            return money(abs(pct) / 100 * value, currency)
+
+        blocks.append(
+            "<div class='tile-grid' style='margin-top:20px'>"
+            "<div class='tile' style='border-top:3px solid " + COLOR_CAUTION + "'>"
+            "<div class='tile-label'>Typical bad day (95% VaR)</div>"
+            f"<div class='tile-value'>{money_at(totals['var_95'])}</div>"
+            f"<div class='tile-detail'>{format_change(totals['var_95'])} &middot; "
+            "one day in twenty is at least this bad</div></div>"
+            "<div class='tile' style='border-top:3px solid " + COLOR_STRESSED + "'>"
+            "<div class='tile-label'>Once it is bad (expected shortfall)</div>"
+            f"<div class='tile-value'>{money_at(totals['shortfall'])}</div>"
+            f"<div class='tile-detail'>{format_change(totals['shortfall'])} &middot; "
+            "the average of those worst days</div></div>"
+            "<div class='tile' style='border-top:3px solid " + COLOR_STRESSED + "'>"
+            "<div class='tile-label'>Worst day in the sample</div>"
+            f"<div class='tile-value'>{money_at(totals['worst_day'])}</div>"
+            f"<div class='tile-detail'>{format_change(totals['worst_day'])} &middot; "
+            f"{totals['worst_date']}</div></div>"
+            "</div>"
+            f"<p class='fine'>Today's holdings applied to the last "
+            f"{totals['sample_days']} trading days on which all of them traded. "
+            f"For scale, your best day on the same basis was "
+            f"{format_change(totals['best_day'])}.</p>"
+        )
+
     # Where the risk actually comes from.
     contributions = totals.get("contributions")
     if contributions:
@@ -2664,6 +2739,7 @@ def render_page(rows, risk_rows, yield_data, correlation, bar_html, trend_html,
   <h2>Your portfolio</h2>
   {portfolio_html}
   <p class="note"><b>What the risk numbers mean.</b> {EXPLANATIONS['portfolio']}</p>
+  <p class="note"><b>On value-at-risk, and why it misleads people.</b> {EXPLANATIONS['drawdown']}</p>
 </section>
 
 
