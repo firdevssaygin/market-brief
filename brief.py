@@ -117,8 +117,15 @@ HIGH_YIELD_TICKER = "HYG"        # high-yield ("junk") corporate bonds
 INVESTMENT_GRADE_TICKER = "LQD"  # investment-grade corporate bonds
 DOLLAR_TICKER = "DX-Y.NYB"       # ICE US Dollar Index
 
-# How far back the credit and dollar comparisons look, in calendar days.
-REGIME_LOOKBACK_DAYS = 90
+# How far back the credit and dollar comparisons look, in trading days.
+# 63 trading days is about three calendar months.
+REGIME_LOOKBACK_DAYS = 63
+
+# The risk watcher scores each indicator by its percentile rank over a trailing
+# year, then averages the four. Two years of history are downloaded so that a
+# full year of scores can be computed - each day needs the year before it.
+RISK_SCORE_WINDOW = 252
+REGIME_HISTORY_PERIOD = "2y"
 
 # An indicator whose newest reading is more than this many days behind the ETF
 # data is treated as stale and labelled on the page instead of shown as current.
@@ -145,6 +152,24 @@ COLOR_SURFACE = "#fcfcfb"
 COLOR_INK = "#0b0b0b"
 COLOR_MUTED = "#898781"
 COLOR_GRID = "#e1e0d9"
+
+# Status colours, kept separate from the series colours above so a state can
+# never be mistaken for a data series. Each is always shown WITH a word - "calm",
+# "stressed" - because two of them are too light to carry meaning by colour alone,
+# and because a reader who cannot separate the hues still needs the reading.
+COLOR_CALM = "#0ca30c"
+COLOR_NORMAL = "#898781"
+COLOR_CAUTION = "#ec835a"
+COLOR_STRESSED = "#d03b3b"
+
+# Where each band starts, and what to call it. Edit these and everything - the
+# gauge, the wording, the colours, the history chart - follows.
+RISK_BANDS = [
+    (0, "Calm", COLOR_CALM),
+    (30, "Normal", COLOR_NORMAL),
+    (60, "Caution", COLOR_CAUTION),
+    (80, "Stressed", COLOR_STRESSED),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -226,6 +251,24 @@ EXPLANATIONS = {
         "before equity markets do. <b>The dollar</b> sets global financial conditions "
         "- a strengthening dollar tightens them everywhere, and tends to weigh on "
         "commodities and emerging markets first."
+    ),
+    "watcher": (
+        "One number for the market's weather, built by scoring each indicator "
+        "below from 0 to 100 and averaging them. A score is that indicator's "
+        "percentile rank over the trailing year: 90 means it sits higher than "
+        "ninety percent of the past year, and every indicator is oriented so that "
+        "a higher score always means more risk. "
+        "Be clear about what this is. It is a <b>construction, not a measurement</b> "
+        "- four indicators equally weighted because there is no principled reason "
+        "to prefer one, and a different analyst would build a different index and "
+        "be equally entitled to. That is why the four components are always shown "
+        "beneath it: when the headline and its parts disagree, the parts are the "
+        "more informative reading. "
+        "Two limits worth holding onto. It is <b>relative to the past year only</b>, "
+        "so a calm year still produces a high score at its own worst moment - the "
+        "score says 'unusual for recently', never 'dangerous in absolute terms'. "
+        "And it describes conditions that already exist; markets turn before the "
+        "indicators that describe them do, so this is a thermometer, not a forecast."
     ),
     "curve": (
         "The gap between the 10-year yield and the 3-month bill, in basis points. "
@@ -503,13 +546,39 @@ def days_behind(series, reference_date):
     return (reference_date - series.index[-1].date()).days
 
 
-def change_over(series, days):
-    """Percentage change over the last `days` calendar days, or None."""
-    cutoff = series.index[-1] - timedelta(days=days)
-    earlier = series[series.index <= cutoff]
-    if earlier.empty:
+def change_over(series, trading_days):
+    """Percentage change against the value `trading_days` rows earlier, as a series.
+
+    pct_change(periods=n) compares each row with the one n rows before it, which
+    is R's (x / lag(x, n) - 1). Taking .iloc[-1] of the result gives today's
+    figure; keeping the whole series lets the risk score be computed for every
+    day in history rather than only today.
+    """
+    if len(series) <= trading_days:
         return None
-    return percent_change(series.iloc[-1], earlier.iloc[-1])
+    return series.pct_change(periods=trading_days) * 100
+
+
+def rolling_percentile(series, window):
+    """Where each value sits within the preceding `window` values, as 0-100.
+
+    .rolling(window).rank(pct=True) ranks the newest value inside each window,
+    so a reading of 90 means "higher than 90% of the past year". Ranking against
+    a moving window rather than the whole history is what stops today's score
+    being influenced by data that had not happened yet.
+    """
+    return series.rolling(window).rank(pct=True) * 100
+
+
+def risk_band(score):
+    """Turn a 0-100 score into (word, colour) using the RISK_BANDS table."""
+    if score is None:
+        return "no reading", COLOR_NORMAL
+    label, color = RISK_BANDS[0][1], RISK_BANDS[0][2]
+    for threshold, band_label, band_color in RISK_BANDS:
+        if score >= threshold:
+            label, color = band_label, band_color
+    return label, color
 
 
 def describe_vix(percentile):
@@ -526,82 +595,113 @@ def describe_vix(percentile):
 
 
 def fetch_risk_regime(reference_date):
-    """Build the four regime indicators. Any that cannot be built comes back None."""
-    regime = {}
+    """Build the four indicators, their risk scores, and the combined watcher.
 
-    # 1. VIX: the level matters less than where it sits in its own distribution.
-    vix = fetch_closes(VIX_TICKER)
+    Returns (tiles, curve_series, score_series_by_name, composite_series).
+
+    Each indicator is turned into a 0-100 score where HIGHER ALWAYS MEANS MORE
+    RISK, by taking its percentile rank over the trailing year and flipping the
+    ones where a high raw reading is reassuring rather than worrying. Ranks are
+    used instead of thresholds so that nothing depends on a number invented by
+    the author: the data decides what counts as unusual for itself.
+    """
+    tiles = {}
+    scores = {}
+    curve_series = None
+
+    # --- 1. VIX. Higher expected volatility means more risk, so no flip. -----
+    vix = fetch_closes(VIX_TICKER, REGIME_HISTORY_PERIOD)
     if vix is not None:
-        percentile = percentile_rank(vix, vix.iloc[-1])
-        reading, tone = describe_vix(percentile)
-        regime["vix"] = {
+        scores["Volatility"] = rolling_percentile(vix, RISK_SCORE_WINDOW)
+        percentile = scores["Volatility"].iloc[-1]
+        reading, _ = describe_vix(percentile)
+        tiles["vix"] = {
             "label": "VIX (expected volatility)",
             "value": f"{vix.iloc[-1]:.1f}",
             "detail": f"{percentile:.0f}th percentile of the past year",
             "reading": reading,
-            "tone": tone,
+            "score": percentile,
             "stale_days": days_behind(vix, reference_date),
         }
 
-    # 2. Yield curve: 10-year minus 3-month, in basis points. Both are quoted in
-    #    percent, so the difference is percentage points; times 100 gives bp.
-    ten_year = fetch_closes(YIELD_TICKER)
-    three_month = fetch_closes(BILL_TICKER)
-    curve_series = None
+    # --- 2. Yield curve: 10-year minus 3-month, in basis points. -------------
+    # Both are quoted in percent, so their difference is in percentage points;
+    # multiplying by 100 turns it into basis points. A LOW or negative spread is
+    # the worrying case, so the rank is flipped.
+    ten_year = fetch_closes(YIELD_TICKER, REGIME_HISTORY_PERIOD)
+    three_month = fetch_closes(BILL_TICKER, REGIME_HISTORY_PERIOD)
     if ten_year is not None and three_month is not None:
         combined = pd.concat(
             [ten_year.rename("ten"), three_month.rename("three")], axis=1, join="inner"
         ).dropna()
         if not combined.empty:
             curve_series = (combined["ten"] - combined["three"]) * 100
+            scores["Yield curve"] = 100 - rolling_percentile(curve_series, RISK_SCORE_WINDOW)
             spread = curve_series.iloc[-1]
             inverted = spread < 0
-            regime["curve"] = {
+            tiles["curve"] = {
                 "label": "Yield curve (10y - 3m)",
                 "value": f"{spread:+.0f}bp",
                 "detail": f"10y {combined['ten'].iloc[-1]:.2f}% vs 3m {combined['three'].iloc[-1]:.2f}%",
                 "reading": "inverted - the market expects rates to fall" if inverted
                            else "positively sloped, as normal",
-                "tone": "notable" if inverted else "flat",
+                "score": scores["Yield curve"].iloc[-1],
                 "stale_days": days_behind(curve_series, reference_date),
             }
 
-    # 3. Credit: high-yield against investment-grade. If the riskier bonds are
-    #    losing ground, lenders are pricing in more defaults.
-    high_yield = fetch_closes(HIGH_YIELD_TICKER)
-    investment_grade = fetch_closes(INVESTMENT_GRADE_TICKER)
+    # --- 3. Credit: high-yield against investment-grade. ---------------------
+    # High-yield lagging means lenders are pricing more defaults, so a HIGH
+    # relative return is reassuring and the rank is flipped.
+    high_yield = fetch_closes(HIGH_YIELD_TICKER, REGIME_HISTORY_PERIOD)
+    investment_grade = fetch_closes(INVESTMENT_GRADE_TICKER, REGIME_HISTORY_PERIOD)
     if high_yield is not None and investment_grade is not None:
         combined = pd.concat(
             [high_yield.rename("hy"), investment_grade.rename("ig")], axis=1, join="inner"
         ).dropna()
         if not combined.empty:
             ratio = combined["hy"] / combined["ig"]
-            move = change_over(ratio, REGIME_LOOKBACK_DAYS)
-            regime["credit"] = {
-                "label": "Credit appetite (HYG vs LQD)",
-                "value": format_change(move),
-                "detail": f"high-yield versus investment-grade, {REGIME_LOOKBACK_DAYS} days",
-                "reading": "high-yield lagging - lenders turning cautious" if move is not None and move < 0
-                           else "high-yield holding up - credit relaxed",
-                "tone": "mild" if move is not None and move < 0 else "flat",
-                "stale_days": days_behind(ratio, reference_date),
+            move_series = change_over(ratio, REGIME_LOOKBACK_DAYS)
+            if move_series is not None:
+                scores["Credit"] = 100 - rolling_percentile(move_series, RISK_SCORE_WINDOW)
+                move = move_series.iloc[-1]
+                tiles["credit"] = {
+                    "label": "Credit appetite (HYG vs LQD)",
+                    "value": format_change(move),
+                    "detail": "high-yield versus investment-grade, about three months",
+                    "reading": "high-yield lagging - lenders turning cautious" if move < 0
+                               else "high-yield holding up - credit relaxed",
+                    "score": scores["Credit"].iloc[-1],
+                    "stale_days": days_behind(ratio, reference_date),
+                }
+
+    # --- 4. The dollar. A rising dollar tightens conditions worldwide, ------
+    # so a high recent gain counts as more risk and the rank is not flipped.
+    dollar = fetch_closes(DOLLAR_TICKER, REGIME_HISTORY_PERIOD)
+    if dollar is not None:
+        move_series = change_over(dollar, REGIME_LOOKBACK_DAYS)
+        if move_series is not None:
+            scores["Dollar"] = rolling_percentile(move_series, RISK_SCORE_WINDOW)
+            move = move_series.iloc[-1]
+            tiles["dollar"] = {
+                "label": "US dollar index",
+                "value": f"{dollar.iloc[-1]:.1f}",
+                "detail": f"{format_change(move)} over about three months",
+                "reading": "strengthening - tighter conditions globally" if move > 0
+                           else "softening - easier conditions globally",
+                "score": scores["Dollar"].iloc[-1],
+                "stale_days": days_behind(dollar, reference_date),
             }
 
-    # 4. The dollar: a rising dollar tightens financial conditions worldwide.
-    dollar = fetch_closes(DOLLAR_TICKER)
-    if dollar is not None:
-        move = change_over(dollar, REGIME_LOOKBACK_DAYS)
-        regime["dollar"] = {
-            "label": "US dollar index",
-            "value": f"{dollar.iloc[-1]:.1f}",
-            "detail": f"{format_change(move)} over {REGIME_LOOKBACK_DAYS} days",
-            "reading": "strengthening - tighter conditions globally" if move is not None and move > 0
-                       else "softening - easier conditions globally",
-            "tone": "flat",
-            "stale_days": days_behind(dollar, reference_date),
-        }
+    # --- The watcher: the average of whichever scores could be built. --------
+    # axis=1 means "across the columns", so this averages the four indicators
+    # for each date rather than averaging each indicator over time.
+    composite = None
+    if scores:
+        aligned = pd.concat(scores.values(), axis=1, join="inner").dropna()
+        if not aligned.empty:
+            composite = aligned.mean(axis=1)
 
-    return regime, curve_series
+    return tiles, curve_series, scores, composite
 
 
 # ---------------------------------------------------------------------------
@@ -961,6 +1061,31 @@ tbody tr:last-child td { border-bottom: none; }
 .table-scroll, .chart-scroll { overflow-x: auto; }
 footer { color: #898781; font-size: 13px; margin-top: 28px; }
 
+/* Risk watcher */
+.watch-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.watch-score { font-size: 52px; font-weight: 600; letter-spacing: -0.03em; line-height: 1; }
+.watch-label { font-size: 22px; font-weight: 600; }
+.watch-of { color: #898781; font-size: 15px; }
+.watch-drift { color: #52514e; font-size: 14px; margin-top: 6px; }
+.gauge { display: flex; height: 10px; border-radius: 999px; overflow: hidden;
+         margin: 18px 0 6px; position: relative; }
+.zone { height: 100%; opacity: 0.30; }
+.marker { position: absolute; top: -4px; width: 3px; height: 18px; background: #0b0b0b;
+          border-radius: 2px; transform: translateX(-1px); }
+.gauge-scale { display: flex; justify-content: space-between; color: #898781; font-size: 12px; }
+.comps { margin-top: 18px; display: grid; gap: 8px; }
+.comp { display: grid; grid-template-columns: 110px 1fr 34px 92px; gap: 10px;
+        align-items: center; font-size: 13px; }
+.comp-name { color: #52514e; }
+.comp-track { background: #f0efec; border-radius: 999px; height: 8px; overflow: hidden; }
+.comp-fill { height: 100%; border-radius: 999px; }
+.comp-score { text-align: right; font-variant-numeric: tabular-nums; color: #52514e; }
+.comp-word { font-weight: 600; }
+@media (max-width: 620px) {
+  .comp { grid-template-columns: 92px 1fr 30px; }
+  .comp-word { display: none; }
+}
+
 /* Regime tiles */
 .tile-grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
 .tile { border: 1px solid #e1e0d9; border-radius: 10px; padding: 14px 16px; }
@@ -971,7 +1096,7 @@ footer { color: #898781; font-size: 13px; margin-top: 28px; }
 /* These readings are sentences, not one-word labels, so they must be allowed to
    wrap - otherwise nowrap pushes them straight out of the tile. */
 .tile-reading { font-size: 13px; }
-.tile-reading .tag { white-space: normal; display: inline-block; line-height: 1.4; }
+.tile-reading .reading { font-weight: 600; line-height: 1.4; }
 
 /* News */
 .feed-grid { display: grid; gap: 18px; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); }
@@ -1050,6 +1175,94 @@ def build_risk_table(risk_rows):
     return "\n".join(lines)
 
 
+def build_watcher_html(composite, scores):
+    """The combined risk reading: one number, its word, and what produced it."""
+    if composite is None or composite.empty:
+        return "<p class='missing'>Not enough data to build a combined reading.</p>"
+
+    score = composite.iloc[-1]
+    label, color = risk_band(score)
+
+    # A month ago, for direction of travel. One number tells you where you are;
+    # two tell you which way things are heading, which is usually the question.
+    previous = composite.iloc[-22] if len(composite) > 22 else None
+    if previous is None:
+        drift = ""
+    else:
+        move = score - previous
+        word = "rising" if move > 3 else ("falling" if move < -3 else "steady")
+        drift = f"<div class='watch-drift'>{word} &mdash; {move:+.0f} points over the past month</div>"
+
+    # The coloured zones behind the marker, built from the same RISK_BANDS table
+    # that decides the wording, so the two can never disagree.
+    zones = []
+    for position, (start, band_label, band_color) in enumerate(RISK_BANDS):
+        end = RISK_BANDS[position + 1][0] if position + 1 < len(RISK_BANDS) else 100
+        zones.append(
+            f"<div class='zone' style='width:{end - start}%;background:{band_color}' "
+            f"title='{band_label}'></div>"
+        )
+
+    rows = []
+    for name, series in scores.items():
+        value = series.iloc[-1]
+        row_label, row_color = risk_band(value)
+        rows.append(
+            "<div class='comp'>"
+            f"<div class='comp-name'>{escape(name)}</div>"
+            "<div class='comp-track'>"
+            f"<div class='comp-fill' style='width:{max(value, 2):.0f}%;background:{row_color}'></div>"
+            "</div>"
+            f"<div class='comp-score'>{value:.0f}</div>"
+            f"<div class='comp-word' style='color:{row_color}'>{row_label}</div>"
+            "</div>"
+        )
+
+    return (
+        "<div class='watch'>"
+        f"<div class='watch-head'>"
+        f"<span class='watch-score' style='color:{color}'>{score:.0f}</span>"
+        f"<span class='watch-label' style='color:{color}'>{label}</span>"
+        f"<span class='watch-of'>/ 100</span>"
+        f"</div>{drift}"
+        f"<div class='gauge'>{''.join(zones)}"
+        f"<div class='marker' style='left:{score:.1f}%'></div></div>"
+        "<div class='gauge-scale'><span>0 calm</span><span>100 stressed</span></div>"
+        f"<div class='comps'>{''.join(rows)}</div>"
+        "</div>"
+    )
+
+
+def build_watcher_chart(composite):
+    """The combined score over the past year, on its coloured bands."""
+    if composite is None or composite.empty:
+        return "<p class='missing'>Not enough history to chart the risk score.</p>"
+
+    figure = go.Figure()
+
+    # Shade each band across the whole width, so the line's height reads as a
+    # state rather than as a bare number.
+    for position, (start, band_label, band_color) in enumerate(RISK_BANDS):
+        end = RISK_BANDS[position + 1][0] if position + 1 < len(RISK_BANDS) else 100
+        figure.add_hrect(y0=start, y1=end, fillcolor=band_color, opacity=0.10,
+                         line_width=0, annotation_text=band_label,
+                         annotation_position="top left",
+                         annotation_font=dict(color=COLOR_MUTED, size=11))
+
+    figure.add_trace(
+        go.Scatter(x=composite.index, y=composite.values, mode="lines",
+                   line=dict(color=COLOR_INK, width=2),
+                   hovertemplate="%{y:.0f}<extra></extra>")
+    )
+    figure.update_layout(
+        **BASE_LAYOUT, height=280, hovermode="x unified", showlegend=False,
+        xaxis=dict(showgrid=False, tickfont=dict(color=COLOR_MUTED), linecolor=COLOR_GRID),
+        yaxis=dict(range=[0, 100], gridcolor=COLOR_GRID, griddash="solid",
+                   tickfont=dict(color=COLOR_MUTED)),
+    )
+    return to_html_fragment(figure)
+
+
 def build_regime_html(regime):
     """The four regime tiles, each flagged if its data has gone stale."""
     if not regime:
@@ -1063,13 +1276,18 @@ def build_regime_html(regime):
             stale = (f"<span class='unconfirmed'>{item['stale_days']} days old - "
                      f"source stopped updating</span>")
 
+        # The tile is coloured by its own risk score, using the same bands as the
+        # watcher above it. The colour is a stripe and a word, never the only
+        # signal: the reading is always spelled out beside it.
+        _, color = risk_band(item["score"])
+
         tiles.append(
-            "<div class='tile'>"
+            f"<div class='tile' style='border-top:3px solid {color}'>"
             f"<div class='tile-label'>{escape(item['label'])}</div>"
             f"<div class='tile-value'>{escape(item['value'])}</div>"
             f"<div class='tile-detail'>{escape(item['detail'])}</div>"
-            f"<div class='tile-reading'><span class='tag {item['tone']}'>"
-            f"{escape(item['reading'])}</span></div>"
+            f"<div class='tile-reading'><span class='reading' "
+            f"style='color:{color}'>{escape(item['reading'])}</span></div>"
             f"{stale}"
             "</div>"
         )
@@ -1227,7 +1445,7 @@ def build_correlation_hero(correlation):
 
 def render_page(rows, risk_rows, yield_data, correlation, bar_html, trend_html,
                 correlation_html, headlines_html, calendar_html, regime_html,
-                curve_html, as_of):
+                curve_html, watcher_html, watcher_chart, as_of):
     """Assemble every piece into one HTML file and save it."""
     generated = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M")
     bar_label = BAR_LABELS[BAR_COLUMN]
@@ -1249,6 +1467,13 @@ def render_page(rows, risk_rows, yield_data, correlation, bar_html, trend_html,
   <p class="stamp">Market data as of the close on {as_of} &nbsp;·&nbsp;
      page generated {generated} Istanbul time</p>
 </header>
+
+<section class="card">
+  <h2>Risk watcher</h2>
+  {watcher_html}
+  <div class="chart-scroll">{watcher_chart}</div>
+  <p class="note"><b>What this number is, and is not.</b> {EXPLANATIONS['watcher']}</p>
+</section>
 
 <section class="card">
   <h2>What kind of market is this?</h2>
@@ -1355,8 +1580,13 @@ def render_page(rows, risk_rows, yield_data, correlation, bar_html, trend_html,
 # MAIN
 # ---------------------------------------------------------------------------
 
-def print_regime(regime):
-    """Print the regime tiles, so they can be checked against the page."""
+def print_regime(regime, composite):
+    """Print the watcher and tiles, so they can be checked against the page."""
+    if composite is not None and not composite.empty:
+        score = composite.iloc[-1]
+        label, _ = risk_band(score)
+        print(f"RISK WATCHER: {score:.0f}/100 - {label}")
+        print()
     print("Market regime")
     print("-" * 79)
     if not regime:
@@ -1441,7 +1671,7 @@ def main():
                       else datetime.now(TIMEZONE).date())
 
     print("Fetching risk regime indicators...")
-    regime, curve_series = fetch_risk_regime(reference_date)
+    regime, curve_series, scores, composite = fetch_risk_regime(reference_date)
     for key, item in regime.items():
         if item["stale_days"] > STALE_AFTER_DAYS:
             print(f"WARNING: {key} data is {item['stale_days']} days old - flagged on the page")
@@ -1470,7 +1700,7 @@ def main():
         )
 
     print()
-    print_regime(regime)
+    print_regime(regime, composite)
     print_summary(rows, risk_rows, yield_data, correlation)
 
     # The "as of" date shown on the page comes from the data itself, never from
@@ -1490,6 +1720,8 @@ def main():
         calendar_html=build_calendar_html(calendar_events, calendar_problems),
         regime_html=build_regime_html(regime),
         curve_html=build_curve_chart(curve_series),
+        watcher_html=build_watcher_html(composite, scores),
+        watcher_chart=build_watcher_chart(composite),
         as_of=as_of,
     )
 
