@@ -25,13 +25,13 @@ on:
     # UTC+3 all year - Turkey stopped changing its clocks in 2016 - so 03:00 UTC
     # is 06:00 in Istanbul, in summer and winter alike. Somewhere with daylight
     # saving would drift by an hour twice a year and need this line edited.
-    # 03:00 UTC is 06:00 in Istanbul, so the
-    # morning brief still lands when you wake up; the other runs exist so that
-    # editing the holdings sheet shows up within a few hours rather than
-    # tomorrow. Editing a Google Sheet cannot notify GitHub, so a schedule is
-    # the only way for those changes to be noticed. Crypto trades at weekends,
-    # so this runs then too. Public repositories get free unlimited minutes and
-    # each run takes about half a minute.
+    #
+    # 03:00 UTC is in this set, so the morning brief still lands when you wake
+    # up. The other runs exist because editing a Google Sheet cannot notify
+    # GitHub - a schedule is the only way a changed holding gets noticed - and
+    # waiting until tomorrow to see it would be too slow. It runs at weekends
+    # too, because crypto trades then. Public repositories get unlimited free
+    # minutes and each run takes about half a minute.
     - cron: "0 */3 * * *"
 
   # Rebuild whenever the holdings or the calendar are edited on GitHub, so a
