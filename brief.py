@@ -736,7 +736,7 @@ def fetch_risk_regime(reference_date):
 # PORTFOLIO
 # ---------------------------------------------------------------------------
 
-REQUIRED_POSITION_FIELDS = ["name", "symbol", "quantity", "buy_date", "buy_price"]
+REQUIRED_POSITION_FIELDS = ["name", "symbol", "quantity", "buy_price"]
 
 
 def position_currency(symbol):
@@ -796,13 +796,13 @@ def positions_from_csv(text):
     # Tolerate capitals, spaces and stray blanks in the header row.
     frame.columns = [str(c).strip().lower().replace(" ", "_") for c in frame.columns]
 
-    required = ["symbol", "quantity", "buy_date", "buy_price"]
+    required = ["symbol", "quantity", "buy_price"]   # buy_date is optional
     missing = [column for column in required if column not in frame.columns]
     if missing:
         return [], [
             f"the sheet is missing these columns: {', '.join(missing)}. "
-            f"It needs a header row reading: name, symbol, quantity, buy_date, "
-            f"buy_price, where. Found instead: {', '.join(frame.columns)}"
+            f"It needs a header row reading: name, symbol, quantity, "
+            f"buy_price, type, where. Found instead: {', '.join(frame.columns)}"
         ]
 
     problems = []
@@ -819,14 +819,21 @@ def positions_from_csv(text):
         if quantity is None or buy_price is None:
             problems.append(f"row {position} ({symbol}): quantity or buy_price is not a number")
             continue
-        try:
-            date.fromisoformat(buy_date)
-        except ValueError:
-            problems.append(
-                f"row {position} ({symbol}): buy_date '{buy_date}' is not YYYY-MM-DD. "
-                f"Format that column as plain text in the sheet if the date keeps changing shape."
-            )
-            continue
+
+        # buy_date is optional. It is unrecoverable from a broker screenshot, and
+        # it affects nothing except a "held since" label - not one profit or risk
+        # figure. Requiring it would only invite an invented date.
+        if buy_date and buy_date.lower() != "nan":
+            try:
+                date.fromisoformat(buy_date)
+            except ValueError:
+                problems.append(
+                    f"row {position} ({symbol}): buy_date '{buy_date}' is not YYYY-MM-DD. "
+                    f"Format that column as plain text in the sheet, or leave it empty."
+                )
+                buy_date = ""
+        else:
+            buy_date = ""
 
         name = str(row.get("name", "") or symbol).strip()
         holdings.append({
@@ -836,6 +843,7 @@ def positions_from_csv(text):
             "buy_price": buy_price,
             "buy_date": buy_date,
             "where": str(row.get("where", "") or "").replace("nan", ""),
+            "kind": str(row.get("type", "") or "other").strip().lower().replace("nan", "other"),
             "currency": position_currency(symbol),
         })
 
@@ -890,7 +898,8 @@ def load_positions(path):
         try:
             quantity = float(entry["quantity"])
             buy_price = float(entry["buy_price"])
-            date.fromisoformat(str(entry["buy_date"]))
+            if entry.get("buy_date"):
+                date.fromisoformat(str(entry["buy_date"]))
         except (ValueError, TypeError):
             problems.append(
                 f"holding {position} ('{entry.get('name')}') has a quantity, price "
@@ -902,7 +911,8 @@ def load_positions(path):
             "symbol": str(entry["symbol"]).strip(),
             "quantity": quantity,
             "buy_price": buy_price,
-            "buy_date": str(entry["buy_date"]),
+            "buy_date": str(entry.get("buy_date", "")),
+            "kind": str(entry.get("type", "other")).lower(),
             "where": str(entry.get("where", "")),
             "currency": position_currency(str(entry["symbol"])),
         })
