@@ -1109,6 +1109,10 @@ def build_portfolio(settings, holdings):
             rows.append({**holding, "price": 1.0, "cost": cost, "value": value,
                          "profit": value - cost,
                          "profit_pct": percent_change(value, cost) if cost else None,
+                         # The same second-currency fields every other row carries.
+                         # Leaving them out is what broke the build the first time.
+                         "value_other": to_other(value),
+                         "profit_other": to_other(value - cost),
                          "as_of": date.today()})
             continue
 
