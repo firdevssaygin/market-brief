@@ -561,10 +561,19 @@ def fetch_yield():
     previous = close_on_or_before(history, latest_date - timedelta(days=1))
     week_ago = close_on_or_before(history, latest_date - timedelta(days=7))
 
+    # Where this level sits against its own recent history. "Expected" has no
+    # objective value for a bond yield, so the honest anchor is the range it has
+    # actually traded in, not a number anyone has forecast.
+    year = dated_series(history["Close"]).dropna()
+    percentile = percentile_rank(year, latest)
+
     return {
         "history": history,
         "date": latest_date,
         "level": latest,
+        "low": float(year.min()),
+        "high": float(year.max()),
+        "percentile": percentile,
         "change_1d_bp": (latest - previous) * 100 if previous else None,
         "change_1w_bp": (latest - week_ago) * 100 if week_ago else None,
     }
@@ -1769,6 +1778,22 @@ footer { color: #898781; font-size: 13px; margin-top: 28px; }
 .corr th { text-align: center; }
 .fine { color: #898781; font-size: 13px; margin: 8px 0 0; }
 
+/* Yield range bar */
+.range { display: flex; align-items: center; gap: 10px; margin: 16px 0 8px; }
+.range-end { font-size: 12px; color: #898781; font-variant-numeric: tabular-nums; }
+.range-track { flex: 1; height: 6px; background: #f0efec; border-radius: 999px; position: relative; }
+.range-mark { position: absolute; top: -4px; width: 3px; height: 14px; border-radius: 2px; }
+.range-note { font-size: 13px; color: #52514e; margin: 0; }
+
+/* Ticker badges */
+.tick { display: inline-flex; align-items: center; justify-content: center;
+        width: 26px; height: 26px; border-radius: 7px; color: #fff; font-size: 11px;
+        font-weight: 700; margin-right: 9px; vertical-align: middle; letter-spacing: 0.02em; }
+
+/* Learn page */
+.learn { color: #52514e; font-size: 14.5px; margin: 0; line-height: 1.65; }
+.learn b { color: #0b0b0b; }
+
 /* Tabs */
 .tabs { display: flex; gap: 4px; flex-wrap: wrap; margin: 0 0 22px;
         border-bottom: 1px solid #e1e0d9; }
@@ -2020,6 +2045,26 @@ def build_curve_chart(curve_series):
     return to_html_fragment(figure)
 
 
+def ticker_initials(symbol):
+    """One or two letters to stand in for a logo."""
+    base = symbol.split("-")[0].split(".")[0].split("=")[0]
+    return base[:2].upper()
+
+
+def ticker_colour(symbol):
+    """A stable colour per symbol, so a holding keeps the same badge every day.
+
+    Hashing the symbol rather than using its position means the colour follows
+    the holding, not its row number - so adding a position does not repaint
+    everything else.
+    """
+    palette = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#4a3aa7", "#008300"]
+    return palette[sum(ord(c) for c in symbol) % len(palette)]
+
+
+ticker_color = ticker_colour   # both spellings work
+
+
 def money(amount, currency):
     """Format an amount of money, or 'n/a' when it is missing."""
     if amount is None:
@@ -2079,7 +2124,8 @@ def build_portfolio_html(settings, rows, totals, problems):
     for row in rows:
         body.append(
             "<tr>"
-            f"<td class='tk'>{escape(row['name'])}</td>"
+            f"<td class='tk'><span class='tick' style='background:{ticker_color(row['symbol'])}'>"
+            f"{escape(ticker_initials(row['symbol']))}</span>{escape(row['name'])}</td>"
             f"<td class='sym'>{escape(row['symbol'])}</td>"
             f"<td>{row['quantity']:,.4f}".rstrip("0").rstrip(".") + "</td>"
             f"<td>{row['buy_price']:,.4f}".rstrip("0").rstrip(".") + "</td>"
@@ -2217,31 +2263,11 @@ def build_portfolio_html(settings, rows, totals, problems):
               f"{factors['days']} days. The rest is specific to your particular "
               f"holdings rather than to any broad market force.</p>")
 
-    # The correlation grid: which holdings are genuinely different bets.
-    correlations = totals.get("correlations")
-    if correlations is not None and len(correlations) >= 2:
-        names = list(correlations.columns)
-        header = "".join(f"<th>{escape(n[:9])}</th>" for n in names)
-        grid = []
-        for row_name in names:
-            cells = []
-            for col_name in names:
-                value = correlations.loc[row_name, col_name]
-                # Tint by strength: darker means the pair moves together more.
-                shade = min(abs(value), 1.0)
-                background = (f"rgba(42,120,214,{shade * 0.55:.2f})" if value >= 0
-                              else f"rgba(227,73,72,{shade * 0.55:.2f})")
-                cells.append(f"<td style='background:{background}'>{value:.2f}</td>")
-            grid.append(f"<tr><td class='tk'>{escape(row_name[:14])}</td>{''.join(cells)}</tr>")
-
-        blocks.append(
-            "<h3 class='sub'>How your holdings move together</h3>"
-            "<div class='table-scroll'><table class='corr'><thead><tr><th></th>"
-            + header + "</tr></thead><tbody>" + "".join(grid) + "</tbody></table></div>"
-            f"<p class='fine'>Measured over the {totals['overlap_days']} days when every "
-            "holding traded. 1.00 means they move identically; 0 means they are "
-            "unrelated; below zero means they tend to move in opposite directions.</p>"
-        )
+    # The correlation grid is deliberately NOT displayed. It still drives the
+    # portfolio volatility and diversification figures above - those cannot be
+    # computed without it - but a seven-by-seven grid of numbers is a wall to
+    # read every morning, and its conclusion is already stated for you in the
+    # diversification benefit and the risk contributions.
 
     return "".join(blocks)
 
@@ -2581,6 +2607,127 @@ def holdings_mentioned(title, rows):
     return sorted(set(found))
 
 
+LEARN_ORDER = [
+    ("watcher", "The risk watcher"),
+    ("regime", "The four regime indicators"),
+    ("curve", "Reading the yield curve"),
+    ("risk", "Z-scores, volatility and drawdown"),
+    ("correlation", "Rolling correlation with yields"),
+    ("portfolio", "Portfolio volatility and diversification"),
+    ("factors", "Factor decomposition"),
+    ("drawdown", "Value-at-risk and expected shortfall"),
+    ("earnings", "Why earnings dates matter"),
+    ("calendar", "Economic releases"),
+    ("bars", "Reading the daily move chart"),
+    ("trend", "Why rebased charts"),
+    ("returns", "Price return versus total return"),
+    ("yield", "The 10-year Treasury yield"),
+    ("headlines", "Why headlines only"),
+    ("tradingview", "What the live panels are"),
+]
+
+
+def build_learn_html():
+    """Every explanation in one place, so the data pages can stay quiet.
+
+    The teaching text used to sit under each table. It made every page long and
+    made a dashboard you read daily carry text you only need to read once.
+    """
+    blocks = ["<p class='fine'>Everything the dashboard assumes you know, gathered "
+              "in one place. The data pages carry only what is true today; this page "
+              "carries what stays true.</p>"]
+    for key, title in LEARN_ORDER:
+        if key not in EXPLANATIONS:
+            continue
+        blocks.append(
+            f"<section class='card'><h2>{escape(title)}</h2>"
+            f"<p class='learn'>{EXPLANATIONS[key]}</p></section>")
+    return "".join(blocks)
+
+
+def build_home_summary(totals, composite, earnings, today):
+    """The four things worth knowing before anything else."""
+    tiles = []
+
+    if composite is not None and not composite.empty:
+        score = composite.iloc[-1]
+        label, colour = risk_band(score)
+        tiles.append(
+            f"<div class='tile' style='border-top:3px solid {colour}'>"
+            "<div class='tile-label'>Market risk</div>"
+            f"<div class='tile-value' style='color:{colour}'>{score:.0f}</div>"
+            f"<div class='tile-detail'>out of 100</div>"
+            f"<div class='tile-reading'><span class='reading' style='color:{colour}'>"
+            f"{label}</span></div></div>")
+
+    if totals.get("value") is not None:
+        profit = totals["profit"]
+        colour = COLOR_CALM if profit >= 0 else COLOR_STRESSED
+        tiles.append(
+            f"<div class='tile' style='border-top:3px solid {colour}'>"
+            "<div class='tile-label'>Portfolio</div>"
+            f"<div class='tile-value'>{money(totals['value'], totals['currency'])}</div>"
+            f"<div class='tile-detail'>{money(totals['value_other'], totals['other_currency'])}</div>"
+            f"<div class='tile-reading'><span class='reading' style='color:{colour}'>"
+            f"{'+' if profit >= 0 else '-'}{money(abs(profit), totals['currency'])} "
+            f"({format_change(totals['profit_pct'])})</span></div></div>")
+
+        if totals.get("var_95") is not None:
+            tiles.append(
+                f"<div class='tile' style='border-top:3px solid {COLOR_CAUTION}'>"
+                "<div class='tile-label'>A bad day costs</div>"
+                f"<div class='tile-value'>"
+                f"{money(abs(totals['var_95']) / 100 * totals['value'], totals['currency'])}</div>"
+                f"<div class='tile-detail'>{format_change(totals['var_95'])}, "
+                "one day in twenty</div></div>")
+
+    if earnings:
+        soonest = earnings[0]
+        colour = COLOR_STRESSED if soonest["days"] <= 7 else COLOR_NORMAL
+        when = "today" if soonest["days"] == 0 else f"in {soonest['days']} days"
+        tiles.append(
+            f"<div class='tile' style='border-top:3px solid {colour}'>"
+            "<div class='tile-label'>Next earnings</div>"
+            f"<div class='tile-value' style='font-size:26px'>{escape(soonest['name'])}</div>"
+            f"<div class='tile-detail'>{soonest['date']}</div>"
+            f"<div class='tile-reading'><span class='reading' style='color:{colour}'>"
+            f"{when}</span></div></div>")
+
+    if not tiles:
+        return "<p class='missing'>Nothing to summarise yet.</p>"
+    return "<div class='tile-grid'>" + "".join(tiles) + "</div>"
+
+
+def build_top_news_html(feeds, rows, limit=6):
+    """A short news list for the home page: your holdings first, then newest."""
+    items = []
+    for feed in feeds:
+        if feed["error"]:
+            continue
+        for item in feed["items"]:
+            items.append({**item, "source": feed["source"],
+                          "category": feed["category"],
+                          "mine": holdings_mentioned(item["title"], rows)})
+    if not items:
+        return "<p class='missing'>No headlines available.</p>"
+
+    # Anything touching a holding is promoted above the merely recent.
+    items.sort(key=lambda i: (0 if i["mine"] else 1,
+                              -(i["published"] or datetime.min).timestamp()))
+    cards = []
+    for item in items[:limit]:
+        color = CATEGORY_COLORS.get(item["category"], COLOR_MUTED)
+        when = item["published"].strftime("%d %b") if item["published"] else ""
+        badges = "".join(f"<span class='mine-badge'>{escape(n)}</span>" for n in item["mine"])
+        cards.append(
+            f"<li class='ncard' style='border-left-color:{color}'>"
+            f"<div class='nmeta'><span class='ndot' style='background:{color}'></span>"
+            f"<span class='nsrc'>{escape(item['source'])} &middot; {when}</span></div>"
+            f"<a href='{escape(item['link'], quote=True)}' target='_blank' "
+            f"rel='noopener noreferrer'>{escape(item['title'])}</a>{badges}</li>")
+    return "<ul class='ngrid'>" + "".join(cards) + "</ul>"
+
+
 def build_headlines_html(feeds, rows):
     """One card per source, each a list of headlines that link out.
 
@@ -2711,6 +2858,22 @@ def build_yield_card(yield_data):
     if yield_data is None:
         return "<p class='missing'>10-year yield unavailable - the download returned no data.</p>"
 
+    low, high = yield_data["low"], yield_data["high"]
+    percentile = yield_data["percentile"]
+    position = (yield_data["level"] - low) / (high - low) * 100 if high > low else 50
+
+    if percentile >= 75:
+        reading = ("near the top of its range - borrowing costs are as high as they "
+                   "have been, which weighs hardest on shares valued for distant profits")
+        colour = COLOR_CAUTION
+    elif percentile <= 25:
+        reading = ("near the bottom of its range - cheap money, which usually favours "
+                   "growth and long-duration assets")
+        colour = COLOR_CALM
+    else:
+        reading = "in the middle of its recent range"
+        colour = COLOR_NORMAL
+
     return (
         "<div class='hero-row'>"
         f"<span class='hero'>{yield_data['level']:.2f}%</span>"
@@ -2720,6 +2883,16 @@ def build_yield_card(yield_data):
         f" &nbsp;·&nbsp; 1-week <b class='{change_class(yield_data['change_1w_bp'])}'>"
         f"{format_basis_points(yield_data['change_1w_bp'])}</b>"
         f"</span></div>"
+        "<div class='range'>"
+        f"<span class='range-end'>{low:.2f}%</span>"
+        "<div class='range-track'>"
+        f"<div class='range-mark' style='left:{position:.1f}%;background:{colour}'></div>"
+        "</div>"
+        f"<span class='range-end'>{high:.2f}%</span></div>"
+        f"<p class='range-note'>Its 12-month range. Today sits at the "
+        f"<b>{percentile:.0f}th percentile</b> &mdash; <span style='color:{colour}'>"
+        f"{reading}</span>. There is no 'correct' level for a yield: what matters is "
+        f"where it is relative to where it has been, and which way it is moving.</p>"
     )
 
 
@@ -2748,7 +2921,8 @@ def build_correlation_hero(correlation):
 def render_page(rows, risk_rows, yield_data, correlation, bar_html, trend_html,
                 correlation_html, headlines_html, calendar_html, regime_html,
                 curve_html, watcher_html, watcher_chart, portfolio_html,
-                tv_chart, tv_calendar, journal_html, earnings_html, as_of):
+                tv_chart, tv_calendar, earnings_html, home_summary,
+                top_news, learn_html, as_of):
     """Assemble every piece into one HTML file and save it."""
     generated = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M")
     bar_label = BAR_LABELS[BAR_COLUMN]
@@ -2772,32 +2946,52 @@ def render_page(rows, risk_rows, yield_data, correlation, bar_html, trend_html,
 </header>
 
 <div class="tabs">
-  <button class="tab on" data-panel="market">Market</button>
+  <button class="tab on" data-panel="home">Home</button>
+  <button class="tab" data-panel="market">Market</button>
   <button class="tab" data-panel="portfolio">Portfolio</button>
   <button class="tab" data-panel="news">News</button>
   <button class="tab" data-panel="calendar">Calendar</button>
-  <button class="tab" data-panel="journal">Journal</button>
+  <button class="tab" data-panel="learn">Learn</button>
 </div>
 
-<div class="panel on" id="panel-market">
+<div class="panel on" id="panel-home">
+
+<section class="card">
+  <h2>Today at a glance</h2>
+  {home_summary}
+</section>
+
+<section class="card">
+  <h2>Live charts &mdash; your holdings</h2>
+  {tv_chart}
+</section>
+
+<section class="card">
+  <h2>Worth reading</h2>
+  {top_news}
+</section>
+
+<section class="card">
+  <h2>Economic calendar</h2>
+  {tv_calendar}
+</section>
+
+</div><div class="panel" id="panel-market">
 
 <section class="card">
   <h2>Risk watcher</h2>
   {watcher_html}
   <div class="chart-scroll">{watcher_chart}</div>
-  <p class="note"><b>What this number is, and is not.</b> {EXPLANATIONS['watcher']}</p>
 </section>
 
 <section class="card">
   <h2>What kind of market is this?</h2>
   {regime_html}
-  <p class="note"><b>Read this panel first.</b> {EXPLANATIONS['regime']}</p>
 </section>
 
 <section class="card">
   <h2>Yield curve: 10-year minus 3-month</h2>
   <div class="chart-scroll">{curve_html}</div>
-  <p class="note"><b>How to read it.</b> {EXPLANATIONS['curve']}</p>
 </section>
 
 <section class="card">
@@ -2814,20 +3008,17 @@ def render_page(rows, risk_rows, yield_data, correlation, bar_html, trend_html,
     </tbody>
   </table>
   </div>
-  <p class="note"><b>How to read it.</b> {EXPLANATIONS['risk']}</p>
 </section>
 
 <section class="card">
   <h2>Do yields still move {YIELD_PAIR_TICKER}?</h2>
   {build_correlation_hero(correlation)}
   <div class="chart-scroll">{correlation_html}</div>
-  <p class="note"><b>What this is testing.</b> {EXPLANATIONS['correlation']}</p>
 </section>
 
 <section class="card">
   <h2>US 10-year Treasury yield</h2>
   {build_yield_card(yield_data)}
-  <p class="note"><b>Why this matters.</b> {EXPLANATIONS['yield']}</p>
 </section>
 
 <section class="card">
@@ -2842,19 +3033,16 @@ def render_page(rows, risk_rows, yield_data, correlation, bar_html, trend_html,
     </tbody>
   </table>
   </div>
-  <p class="note"><b>Price return, not total return.</b> {EXPLANATIONS['returns']}</p>
 </section>
 
 <section class="card">
   <h2>{bar_label} move by fund</h2>
   <div class="chart-scroll">{bar_html}</div>
-  <p class="note"><b>How to read it.</b> {EXPLANATIONS['bars']}</p>
 </section>
 
 <section class="card">
   <h2>{" vs ".join(TREND_TICKERS)} &mdash; last {TREND_DAYS} days, rebased to 100</h2>
   <div class="chart-scroll">{trend_html}</div>
-  <p class="note"><b>Why both lines start at 100.</b> {EXPLANATIONS['trend']}</p>
 </section>
 
 </div><div class="panel" id="panel-portfolio">
@@ -2862,43 +3050,24 @@ def render_page(rows, risk_rows, yield_data, correlation, bar_html, trend_html,
 <section class="card">
   <h2>Your portfolio</h2>
   {portfolio_html}
-  <p class="note"><b>What the risk numbers mean.</b> {EXPLANATIONS['portfolio']}</p>
-  <p class="note"><b>On value-at-risk, and why it misleads people.</b> {EXPLANATIONS['drawdown']}</p>
-  <p class="note"><b>Reading the factor numbers.</b> {EXPLANATIONS['factors']}</p>
 </section>
 
 
-<section class="card">
-  <h2>Live charts &mdash; your holdings</h2>
-  {tv_chart}
-  <p class="note"><b>Why this panel is different.</b> {EXPLANATIONS['tradingview']}</p>
-</section>
-</div><div class="panel" id="panel-journal">
+</div><div class="panel" id="panel-learn">
 
-<section class="card">
-  <h2>Decision journal</h2>
-  {journal_html}
-  <p class="note"><b>Why calibration, not accuracy.</b> {EXPLANATIONS['journal']}</p>
-</section>
-
+{learn_html}
 
 </div><div class="panel" id="panel-calendar">
 
 <section class="card">
   <h2>Earnings radar &mdash; your shares</h2>
   {earnings_html}
-  <p class="note"><b>Why this matters more than it looks.</b> {EXPLANATIONS['earnings']}</p>
 </section>
 
 
 <section class="card">
   <h2>Upcoming US releases</h2>
   {calendar_html}
-  <p class="note"><b>Why a calendar belongs here.</b> {EXPLANATIONS['calendar']}</p>
-</section>
-<section class="card">
-  <h2>Economic calendar</h2>
-  {tv_calendar}
 </section>
 
 </div><div class="panel" id="panel-news">
@@ -2906,7 +3075,6 @@ def render_page(rows, risk_rows, yield_data, correlation, bar_html, trend_html,
 <section class="card">
   <h2>Headlines</h2>
   {headlines_html}
-  <p class="note"><b>Links only, on purpose.</b> {EXPLANATIONS['headlines']}</p>
 </section>
 
 </div>
@@ -3111,8 +3279,10 @@ def main():
         watcher_html=build_watcher_html(composite, scores),
         watcher_chart=build_watcher_chart(composite),
         earnings_html=build_earnings_html(earnings, reference_today),
-        journal_html=build_journal_html(journal_entries, journal_resolved,
-                                        journal_open, journal_problems),
+        home_summary=build_home_summary(portfolio_totals, composite, earnings,
+                                        reference_today),
+        top_news=build_top_news_html(feeds, portfolio_rows),
+        learn_html=build_learn_html(),
         tv_chart=build_tradingview_chart(portfolio_rows),
         tv_calendar=build_tradingview_calendar(),
         portfolio_html=build_portfolio_html(settings, portfolio_rows,
