@@ -1,14 +1,14 @@
 """Daily market brief.
 
-Stage 3: an analysis tool, not a data display.
+An analysis tool, not a data display. Run it and it writes docs/index.html.
 
 WHY THIS EXISTS AT ALL
   Closing prices are one click away on any finance site. What is NOT one click
-  away is context: whether today's move was statistically unusual, whether the
-  textbook relationship between bond yields and technology stocks is actually
-  holding right now, and where each fund sits in its own volatility and
-  drawdown history. All of that needs a year of history and some arithmetic on
-  top of it, which is what this script does.
+  away is context: what kind of market this is, whether today's move was
+  statistically unusual, whether the textbook relationship between bond yields
+  and technology stocks is actually holding right now, and where each fund sits
+  in its own volatility and drawdown history. All of that needs a year of
+  history and some arithmetic on top of it, which is what this script does.
 
 THE ONE RULE THIS FILE ENFORCES
   Numbers come from data that was actually downloaded. Text in EXPLANATIONS is
@@ -109,6 +109,27 @@ FEED_TIMEOUT_SECONDS = 20
 CALENDAR_PATH = Path(__file__).parent / "calendar.json"
 CALENDAR_EVENTS_SHOWN = 6
 
+# --- Risk regime -----------------------------------------------------------
+# Four free indicators that describe the environment rather than any one fund.
+VIX_TICKER = "^VIX"              # expected volatility of the S&P 500
+BILL_TICKER = "^IRX"             # 13-week Treasury bill yield, the short end
+HIGH_YIELD_TICKER = "HYG"        # high-yield ("junk") corporate bonds
+INVESTMENT_GRADE_TICKER = "LQD"  # investment-grade corporate bonds
+DOLLAR_TICKER = "DX-Y.NYB"       # ICE US Dollar Index
+
+# How far back the credit and dollar comparisons look, in calendar days.
+REGIME_LOOKBACK_DAYS = 90
+
+# An indicator whose newest reading is more than this many days behind the ETF
+# data is treated as stale and labelled on the page instead of shown as current.
+#
+# This exists because of a real near-miss. Yahoo's ^VIX3M series stopped
+# updating on 2026-07-17 while ^VIX carried on, so a VIX term-structure ratio
+# would have divided a fresh number by a three-week-old one and printed a
+# confident, meaningless answer. A number that is quietly out of date is more
+# dangerous than one that is obviously missing.
+STALE_AFTER_DAYS = 5
+
 
 # ---------------------------------------------------------------------------
 # COLOURS - checked with a colourblindness validator, not chosen by eye
@@ -186,6 +207,33 @@ EXPLANATIONS = {
         "dual-axis charts are the single most misleading chart in finance. Rebased "
         "to a common start, the vertical gap between the lines is the actual "
         "difference in return since that date, and nothing else."
+    ),
+    "regime": (
+        "These four say nothing about any single fund. They describe the weather - "
+        "and the same position can be sensible in one environment and reckless in "
+        "another, so this is the panel to read first. "
+        "<b>VIX</b> is what option prices imply about how much the S&P 500 will move "
+        "over the coming month; its percentile matters more than its level, because "
+        "what counts as a high reading differs between a calm year and a turbulent "
+        "one. <b>The yield curve</b> compares the 10-year yield with the 3-month "
+        "bill: normally longer money pays more, and when it does not - an inversion - "
+        "the market is saying it expects rates to be cut, usually because it expects "
+        "trouble. Inversions have preceded most post-war US recessions, but with lags "
+        "measured in quarters and several false alarms, so it is a warning light, "
+        "never a timing signal. <b>Credit</b> compares high-yield bonds with "
+        "investment-grade ones: when the riskier of the two starts lagging, lenders "
+        "are pricing more defaults, and credit markets have a long record of noticing "
+        "before equity markets do. <b>The dollar</b> sets global financial conditions "
+        "- a strengthening dollar tightens them everywhere, and tends to weigh on "
+        "commodities and emerging markets first."
+    ),
+    "curve": (
+        "The gap between the 10-year yield and the 3-month bill, in basis points. "
+        "Above the line, longer borrowing costs more than short, which is the normal "
+        "state of affairs. Below it, the curve is inverted. Watch the direction of "
+        "travel as much as the level: a curve steepening back through zero after an "
+        "inversion has historically been closer to trouble than the inversion itself, "
+        "because it usually means cuts have started."
     ),
     "headlines": (
         "Headline, source, date and link only - no summaries and no article text. "
@@ -430,6 +478,130 @@ def rebased_trend(rows, tickers, days):
             continue
         by_ticker[row["ticker"]] = closes / closes.iloc[0] * 100
     return by_ticker
+
+
+# ---------------------------------------------------------------------------
+# RISK REGIME
+# ---------------------------------------------------------------------------
+
+def fetch_closes(ticker, period="1y"):
+    """Closing prices labelled by plain date, with gaps removed.
+
+    .dropna() throws away days where Yahoo has a hole in the series. Without it,
+    "the last row" can be an empty value that quietly poisons every calculation
+    downstream - which is exactly what ^VIX3M does.
+    """
+    history = download_history(ticker, period=period)
+    if history is None:
+        return None
+    closes = dated_series(history["Close"]).dropna()
+    return closes if not closes.empty else None
+
+
+def days_behind(series, reference_date):
+    """How many days old the newest reading is, compared with the ETF data."""
+    return (reference_date - series.index[-1].date()).days
+
+
+def change_over(series, days):
+    """Percentage change over the last `days` calendar days, or None."""
+    cutoff = series.index[-1] - timedelta(days=days)
+    earlier = series[series.index <= cutoff]
+    if earlier.empty:
+        return None
+    return percent_change(series.iloc[-1], earlier.iloc[-1])
+
+
+def describe_vix(percentile):
+    """Plain words for where volatility sits against its own past year."""
+    if percentile is None:
+        return "no reading", "flat"
+    if percentile >= 90:
+        return "stressed - volatility near its highest of the past year", "notable"
+    if percentile >= 75:
+        return "elevated", "mild"
+    if percentile <= 25:
+        return "calm", "flat"
+    return "normal", "flat"
+
+
+def fetch_risk_regime(reference_date):
+    """Build the four regime indicators. Any that cannot be built comes back None."""
+    regime = {}
+
+    # 1. VIX: the level matters less than where it sits in its own distribution.
+    vix = fetch_closes(VIX_TICKER)
+    if vix is not None:
+        percentile = percentile_rank(vix, vix.iloc[-1])
+        reading, tone = describe_vix(percentile)
+        regime["vix"] = {
+            "label": "VIX (expected volatility)",
+            "value": f"{vix.iloc[-1]:.1f}",
+            "detail": f"{percentile:.0f}th percentile of the past year",
+            "reading": reading,
+            "tone": tone,
+            "stale_days": days_behind(vix, reference_date),
+        }
+
+    # 2. Yield curve: 10-year minus 3-month, in basis points. Both are quoted in
+    #    percent, so the difference is percentage points; times 100 gives bp.
+    ten_year = fetch_closes(YIELD_TICKER)
+    three_month = fetch_closes(BILL_TICKER)
+    curve_series = None
+    if ten_year is not None and three_month is not None:
+        combined = pd.concat(
+            [ten_year.rename("ten"), three_month.rename("three")], axis=1, join="inner"
+        ).dropna()
+        if not combined.empty:
+            curve_series = (combined["ten"] - combined["three"]) * 100
+            spread = curve_series.iloc[-1]
+            inverted = spread < 0
+            regime["curve"] = {
+                "label": "Yield curve (10y - 3m)",
+                "value": f"{spread:+.0f}bp",
+                "detail": f"10y {combined['ten'].iloc[-1]:.2f}% vs 3m {combined['three'].iloc[-1]:.2f}%",
+                "reading": "inverted - the market expects rates to fall" if inverted
+                           else "positively sloped, as normal",
+                "tone": "notable" if inverted else "flat",
+                "stale_days": days_behind(curve_series, reference_date),
+            }
+
+    # 3. Credit: high-yield against investment-grade. If the riskier bonds are
+    #    losing ground, lenders are pricing in more defaults.
+    high_yield = fetch_closes(HIGH_YIELD_TICKER)
+    investment_grade = fetch_closes(INVESTMENT_GRADE_TICKER)
+    if high_yield is not None and investment_grade is not None:
+        combined = pd.concat(
+            [high_yield.rename("hy"), investment_grade.rename("ig")], axis=1, join="inner"
+        ).dropna()
+        if not combined.empty:
+            ratio = combined["hy"] / combined["ig"]
+            move = change_over(ratio, REGIME_LOOKBACK_DAYS)
+            regime["credit"] = {
+                "label": "Credit appetite (HYG vs LQD)",
+                "value": format_change(move),
+                "detail": f"high-yield versus investment-grade, {REGIME_LOOKBACK_DAYS} days",
+                "reading": "high-yield lagging - lenders turning cautious" if move is not None and move < 0
+                           else "high-yield holding up - credit relaxed",
+                "tone": "mild" if move is not None and move < 0 else "flat",
+                "stale_days": days_behind(ratio, reference_date),
+            }
+
+    # 4. The dollar: a rising dollar tightens financial conditions worldwide.
+    dollar = fetch_closes(DOLLAR_TICKER)
+    if dollar is not None:
+        move = change_over(dollar, REGIME_LOOKBACK_DAYS)
+        regime["dollar"] = {
+            "label": "US dollar index",
+            "value": f"{dollar.iloc[-1]:.1f}",
+            "detail": f"{format_change(move)} over {REGIME_LOOKBACK_DAYS} days",
+            "reading": "strengthening - tighter conditions globally" if move is not None and move > 0
+                       else "softening - easier conditions globally",
+            "tone": "flat",
+            "stale_days": days_behind(dollar, reference_date),
+        }
+
+    return regime, curve_series
 
 
 # ---------------------------------------------------------------------------
@@ -789,6 +961,18 @@ tbody tr:last-child td { border-bottom: none; }
 .table-scroll, .chart-scroll { overflow-x: auto; }
 footer { color: #898781; font-size: 13px; margin-top: 28px; }
 
+/* Regime tiles */
+.tile-grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.tile { border: 1px solid #e1e0d9; border-radius: 10px; padding: 14px 16px; }
+.tile-label { font-size: 12px; color: #898781; text-transform: uppercase;
+              letter-spacing: 0.04em; font-weight: 600; }
+.tile-value { font-size: 30px; font-weight: 600; letter-spacing: -0.02em; margin: 6px 0 2px; }
+.tile-detail { font-size: 13px; color: #52514e; margin-bottom: 8px; }
+/* These readings are sentences, not one-word labels, so they must be allowed to
+   wrap - otherwise nowrap pushes them straight out of the tile. */
+.tile-reading { font-size: 13px; }
+.tile-reading .tag { white-space: normal; display: inline-block; line-height: 1.4; }
+
 /* News */
 .feed-grid { display: grid; gap: 18px; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); }
 .feed h3 { font-size: 13px; margin: 0 0 10px; color: #185ea8; font-weight: 600;
@@ -864,6 +1048,55 @@ def build_risk_table(risk_rows):
     if not lines:
         return "<tr><td class='missing'>No data available.</td></tr>"
     return "\n".join(lines)
+
+
+def build_regime_html(regime):
+    """The four regime tiles, each flagged if its data has gone stale."""
+    if not regime:
+        return "<p class='missing'>No regime indicators could be loaded.</p>"
+
+    tiles = []
+    for item in regime.values():
+        # A stale indicator is labelled rather than quietly presented as current.
+        stale = ""
+        if item["stale_days"] > STALE_AFTER_DAYS:
+            stale = (f"<span class='unconfirmed'>{item['stale_days']} days old - "
+                     f"source stopped updating</span>")
+
+        tiles.append(
+            "<div class='tile'>"
+            f"<div class='tile-label'>{escape(item['label'])}</div>"
+            f"<div class='tile-value'>{escape(item['value'])}</div>"
+            f"<div class='tile-detail'>{escape(item['detail'])}</div>"
+            f"<div class='tile-reading'><span class='tag {item['tone']}'>"
+            f"{escape(item['reading'])}</span></div>"
+            f"{stale}"
+            "</div>"
+        )
+
+    return "<div class='tile-grid'>" + "".join(tiles) + "</div>"
+
+
+def build_curve_chart(curve_series):
+    """The 10-year minus 3-month spread over the past year, with zero marked."""
+    if curve_series is None or curve_series.empty:
+        return "<p class='missing'>Not enough data to draw the yield curve.</p>"
+
+    # Colour by side of the line: below zero is the condition worth noticing.
+    figure = go.Figure(
+        go.Scatter(x=curve_series.index, y=curve_series.values, mode="lines",
+                   line=dict(color=COLOR_UP, width=2),
+                   hovertemplate="%{y:+.0f}bp<extra></extra>")
+    )
+    figure.add_hline(y=0, line_color=COLOR_DOWN, line_width=1)
+
+    figure.update_layout(
+        **BASE_LAYOUT, height=260, hovermode="x unified", showlegend=False,
+        xaxis=dict(showgrid=False, tickfont=dict(color=COLOR_MUTED), linecolor=COLOR_GRID),
+        yaxis=dict(gridcolor=COLOR_GRID, griddash="solid", ticksuffix="bp",
+                   tickfont=dict(color=COLOR_MUTED)),
+    )
+    return to_html_fragment(figure)
 
 
 def build_headlines_html(feeds):
@@ -993,7 +1226,8 @@ def build_correlation_hero(correlation):
 
 
 def render_page(rows, risk_rows, yield_data, correlation, bar_html, trend_html,
-                correlation_html, headlines_html, calendar_html, as_of):
+                correlation_html, headlines_html, calendar_html, regime_html,
+                curve_html, as_of):
     """Assemble every piece into one HTML file and save it."""
     generated = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M")
     bar_label = BAR_LABELS[BAR_COLUMN]
@@ -1015,6 +1249,18 @@ def render_page(rows, risk_rows, yield_data, correlation, bar_html, trend_html,
   <p class="stamp">Market data as of the close on {as_of} &nbsp;·&nbsp;
      page generated {generated} Istanbul time</p>
 </header>
+
+<section class="card">
+  <h2>What kind of market is this?</h2>
+  {regime_html}
+  <p class="note"><b>Read this panel first.</b> {EXPLANATIONS['regime']}</p>
+</section>
+
+<section class="card">
+  <h2>Yield curve: 10-year minus 3-month</h2>
+  <div class="chart-scroll">{curve_html}</div>
+  <p class="note"><b>How to read it.</b> {EXPLANATIONS['curve']}</p>
+</section>
 
 <section class="card">
   <h2>Was today unusual?</h2>
@@ -1109,6 +1355,19 @@ def render_page(rows, risk_rows, yield_data, correlation, bar_html, trend_html,
 # MAIN
 # ---------------------------------------------------------------------------
 
+def print_regime(regime):
+    """Print the regime tiles, so they can be checked against the page."""
+    print("Market regime")
+    print("-" * 79)
+    if not regime:
+        print("  no indicators available")
+        return
+    for item in regime.values():
+        flag = f"  [{item['stale_days']}d old]" if item["stale_days"] > STALE_AFTER_DAYS else ""
+        print(f"  {item['label']:<30} {item['value']:>8}   {item['reading']}{flag}")
+    print()
+
+
 def print_summary(rows, risk_rows, yield_data, correlation):
     """Print the same figures to the terminal, so the page can be checked."""
     print("ETF snapshot - source: Yahoo Finance via the yfinance package")
@@ -1175,6 +1434,18 @@ def main():
 
     yield_data = fetch_yield()
 
+    # The reference date comes from the ETF data, not the clock, so staleness is
+    # judged against what the market actually did rather than what day it is.
+    dated_rows = [row for row in rows if row is not None]
+    reference_date = (dated_rows[0]["date"].date() if dated_rows
+                      else datetime.now(TIMEZONE).date())
+
+    print("Fetching risk regime indicators...")
+    regime, curve_series = fetch_risk_regime(reference_date)
+    for key, item in regime.items():
+        if item["stale_days"] > STALE_AFTER_DAYS:
+            print(f"WARNING: {key} data is {item['stale_days']} days old - flagged on the page")
+
     print("Computing statistics...")
     risk_rows = [compute_risk(row) if row is not None else None for row in rows]
 
@@ -1199,6 +1470,7 @@ def main():
         )
 
     print()
+    print_regime(regime)
     print_summary(rows, risk_rows, yield_data, correlation)
 
     # The "as of" date shown on the page comes from the data itself, never from
@@ -1216,6 +1488,8 @@ def main():
         correlation_html=build_correlation_chart(correlation),
         headlines_html=build_headlines_html(feeds),
         calendar_html=build_calendar_html(calendar_events, calendar_problems),
+        regime_html=build_regime_html(regime),
+        curve_html=build_curve_chart(curve_series),
         as_of=as_of,
     )
 
