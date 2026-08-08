@@ -109,6 +109,9 @@ FEED_TIMEOUT_SECONDS = 20
 CALENDAR_PATH = Path(__file__).parent / "calendar.json"
 CALENDAR_EVENTS_SHOWN = 6
 
+# Your holdings, the other file you maintain by hand.
+POSITIONS_PATH = Path(__file__).parent / "positions.json"
+
 # --- Risk regime -----------------------------------------------------------
 # Four free indicators that describe the environment rather than any one fund.
 VIX_TICKER = "^VIX"              # expected volatility of the S&P 500
@@ -277,6 +280,25 @@ EXPLANATIONS = {
         "travel as much as the level: a curve steepening back through zero after an "
         "inversion has historically been closer to trouble than the inversion itself, "
         "because it usually means cuts have started."
+    ),
+    "portfolio": (
+        "Two numbers here are worth more than the profit figure. "
+        "<b>Portfolio volatility</b> is not the average of your holdings' "
+        "volatilities - it is calculated from how they actually move together, "
+        "using the covariance between every pair. Two holdings that rise and fall "
+        "in step are nearly one holding; two that move independently partly cancel "
+        "each other out. The gap between the true figure and the naive weighted "
+        "average is the <b>diversification benefit</b>: real risk reduction you get "
+        "for free, measured rather than assumed. "
+        "The correlation grid shows where it comes from. Holdings with high "
+        "correlation are the same bet under two names, however different the "
+        "companies look - and correlations rise toward one during a crisis, exactly "
+        "when the protection matters most, so treat calm-period diversification as "
+        "the optimistic case. "
+        "Everything is converted to one currency at the live rate before being "
+        "added up. Profit is against your stated buy price and ignores commission, "
+        "spread and tax, so it is the gross figure, not what you would actually "
+        "walk away with."
     ),
     "headlines": (
         "Headline, source, date and link only - no summaries and no article text. "
@@ -705,6 +727,208 @@ def fetch_risk_regime(reference_date):
 
 
 # ---------------------------------------------------------------------------
+# PORTFOLIO
+# ---------------------------------------------------------------------------
+
+REQUIRED_POSITION_FIELDS = ["name", "symbol", "quantity", "buy_date", "buy_price"]
+
+
+def position_currency(symbol):
+    """Which currency a Yahoo symbol is priced in.
+
+    Borsa Istanbul symbols end in .IS and are quoted in lira; everything else
+    here is quoted in dollars. Adding the two together without converting would
+    produce a total that means nothing at all.
+    """
+    return "TRY" if symbol.upper().endswith(".IS") else "USD"
+
+
+def load_positions(path):
+    """Read positions.json and return (settings, holdings, problems)."""
+    if not path.exists():
+        return {}, [], [f"positions.json was not found at {path}"]
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        return {}, [], [
+            f"positions.json is not valid JSON - line {error.lineno}, column "
+            f"{error.colno}: {error.msg}. The usual causes are a missing comma "
+            f"between two holdings, or a quote left unclosed."
+        ]
+
+    settings = {
+        "is_example": bool(data.get("is_example", False)),
+        "reporting_currency": str(data.get("reporting_currency", "USD")).upper(),
+    }
+
+    raw = data.get("positions")
+    if not isinstance(raw, list):
+        return settings, [], ["positions.json has no 'positions' list inside it."]
+
+    problems = []
+    holdings = []
+    for position, entry in enumerate(raw, start=1):
+        missing = [f for f in REQUIRED_POSITION_FIELDS if entry.get(f) in (None, "")]
+        if missing:
+            problems.append(f"holding {position} is missing: {', '.join(missing)}")
+            continue
+        try:
+            quantity = float(entry["quantity"])
+            buy_price = float(entry["buy_price"])
+            date.fromisoformat(str(entry["buy_date"]))
+        except (ValueError, TypeError):
+            problems.append(
+                f"holding {position} ('{entry.get('name')}') has a quantity, price "
+                f"or date that is not a plain number or YYYY-MM-DD date."
+            )
+            continue
+        holdings.append({
+            "name": str(entry["name"]),
+            "symbol": str(entry["symbol"]).strip(),
+            "quantity": quantity,
+            "buy_price": buy_price,
+            "buy_date": str(entry["buy_date"]),
+            "where": str(entry.get("where", "")),
+            "currency": position_currency(str(entry["symbol"])),
+        })
+
+    if not holdings and not problems:
+        problems.append("positions.json has no holdings in it yet.")
+
+    return settings, holdings, problems
+
+
+def build_portfolio(settings, holdings):
+    """Price every holding, convert to one currency, and measure the whole.
+
+    Returns (rows, totals, problems). A holding whose price cannot be fetched is
+    reported and left out rather than guessed at.
+    """
+    problems = []
+    reporting = settings.get("reporting_currency", "USD")
+
+    # The live exchange rate, needed whenever lira and dollars appear together.
+    fx = fetch_closes("USDTRY=X", "1y")
+    usd_try = fx.iloc[-1] if fx is not None else None
+
+    def to_reporting(amount, currency):
+        """Convert an amount into the reporting currency, or None if we cannot."""
+        if currency == reporting:
+            return amount
+        if usd_try is None:
+            return None
+        return amount * usd_try if currency == "USD" else amount / usd_try
+
+    rows = []
+    returns_by_name = {}
+
+    for holding in holdings:
+        closes = fetch_closes(holding["symbol"], "1y")
+        if closes is None:
+            problems.append(f"no price data for {holding['symbol']} - left out of the totals")
+            continue
+
+        price = closes.iloc[-1]
+        cost_native = holding["quantity"] * holding["buy_price"]
+        value_native = holding["quantity"] * price
+
+        cost = to_reporting(cost_native, holding["currency"])
+        value = to_reporting(value_native, holding["currency"])
+        if cost is None or value is None:
+            problems.append(f"could not convert {holding['symbol']} into {reporting}")
+            continue
+
+        # Daily returns are kept so portfolio volatility can be measured properly
+        # from how the holdings move together, not by averaging them.
+        returns_by_name[holding["name"]] = closes.pct_change().dropna() * 100
+
+        rows.append({
+            **holding,
+            "price": price,
+            "cost": cost,
+            "value": value,
+            "profit": value - cost,
+            "profit_pct": percent_change(value, cost) if cost else None,
+            "as_of": closes.index[-1].date(),
+        })
+
+    if not rows:
+        return [], {}, problems
+
+    total_value = sum(row["value"] for row in rows)
+    total_cost = sum(row["cost"] for row in rows)
+
+    for row in rows:
+        row["weight"] = row["value"] / total_value * 100 if total_value else 0
+
+    rows.sort(key=lambda row: row["value"], reverse=True)
+
+    totals = {
+        "value": total_value,
+        "cost": total_cost,
+        "profit": total_value - total_cost,
+        "profit_pct": percent_change(total_value, total_cost) if total_cost else None,
+        "currency": reporting,
+        "usd_try": usd_try,
+        "top_three": sum(row["weight"] for row in rows[:3]),
+        "count": len(rows),
+    }
+    totals.update(measure_portfolio_risk(rows, returns_by_name))
+    return rows, totals, problems
+
+
+def measure_portfolio_risk(rows, returns_by_name):
+    """Portfolio volatility, the diversification it buys, and correlations.
+
+    THE POINT OF THIS FUNCTION. Portfolio risk is not the average of the risks of
+    what you hold. Two holdings that rise and fall together are nearly one
+    holding; two that move independently partly cancel out. The proper
+    calculation combines the weights with the covariance matrix - how each pair
+    moves together - and the gap between that answer and the naive weighted
+    average is the diversification you are actually getting.
+    """
+    if len(returns_by_name) < 2:
+        return {}
+
+    # Line the daily returns up by date. Crypto trades at weekends and shares do
+    # not, so join="inner" keeps only the days when everything traded.
+    aligned = pd.concat(returns_by_name.values(), axis=1, join="inner").dropna()
+    aligned.columns = list(returns_by_name.keys())
+    if len(aligned) < 30:
+        return {}
+
+    weights = pd.Series(
+        {row["name"]: row["weight"] / 100 for row in rows if row["name"] in aligned.columns}
+    )
+    weights = weights.reindex(aligned.columns).fillna(0)
+    if weights.sum() == 0:
+        return {}
+    weights = weights / weights.sum()
+
+    # Individual annualised volatilities.
+    individual = aligned.std() * sqrt(TRADING_DAYS_PER_YEAR)
+
+    # The naive figure: what portfolio volatility would be if everything moved
+    # in perfect lockstep.
+    weighted_average = float((weights * individual).sum())
+
+    # The real figure: w' C w, where C is the covariance matrix. The square root
+    # turns variance back into volatility.
+    covariance = aligned.cov()
+    variance = float(weights.values @ covariance.values @ weights.values)
+    portfolio_vol = sqrt(max(variance, 0)) * sqrt(TRADING_DAYS_PER_YEAR)
+
+    return {
+        "portfolio_vol": portfolio_vol,
+        "weighted_avg_vol": weighted_average,
+        "diversification": weighted_average - portfolio_vol,
+        "correlations": aligned.corr(),
+        "overlap_days": len(aligned),
+    }
+
+
+# ---------------------------------------------------------------------------
 # NEWS AND CALENDAR
 # ---------------------------------------------------------------------------
 
@@ -1098,6 +1322,13 @@ footer { color: #898781; font-size: 13px; margin-top: 28px; }
 .tile-reading { font-size: 13px; }
 .tile-reading .reading { font-weight: 600; line-height: 1.4; }
 
+/* Portfolio */
+.sym { color: #898781; font-size: 13px; }
+.sub { font-size: 14px; margin: 24px 0 10px; color: #52514e; font-weight: 600; }
+.corr td { text-align: center; font-variant-numeric: tabular-nums; font-size: 13px; }
+.corr th { text-align: center; }
+.fine { color: #898781; font-size: 13px; margin: 8px 0 0; }
+
 /* News */
 .feed-grid { display: grid; gap: 18px; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); }
 .feed h3 { font-size: 13px; margin: 0 0 10px; color: #185ea8; font-weight: 600;
@@ -1317,6 +1548,128 @@ def build_curve_chart(curve_series):
     return to_html_fragment(figure)
 
 
+def money(amount, currency):
+    """Format an amount of money, or 'n/a' when it is missing."""
+    if amount is None:
+        return "n/a"
+    symbol = "$" if currency == "USD" else "₺"
+    return f"{symbol}{amount:,.2f}"
+
+
+def build_portfolio_html(settings, rows, totals, problems):
+    """The holdings table, the totals, and what the portfolio's risk really is."""
+    blocks = []
+
+    if settings.get("is_example"):
+        blocks.append(
+            "<div class='warn'><b>These are placeholder numbers.</b> The symbols come "
+            "from your TradingView list, but the quantities, buy dates and buy prices "
+            "are invented so the panel has something to show. Edit positions.json with "
+            "your real figures and set is_example to false.</div>"
+        )
+
+    if problems:
+        listed = "".join(f"<li>{escape(problem)}</li>" for problem in problems)
+        blocks.append(f"<div class='warn'><b>positions.json needs attention</b>"
+                      f"<ul>{listed}</ul></div>")
+
+    if not rows:
+        blocks.append("<p class='missing'>No holdings could be priced.</p>")
+        return "".join(blocks)
+
+    currency = totals["currency"]
+
+    # Headline: what it is worth, and what that cost.
+    blocks.append(
+        "<div class='hero-row'>"
+        f"<span class='hero'>{money(totals['value'], currency)}</span>"
+        f"<span class='hero-side'>"
+        f"<b class='{change_class(totals['profit'])}'>"
+        f"{'+' if totals['profit'] >= 0 else '-'}{money(abs(totals['profit']), currency)} "
+        f"({format_change(totals['profit_pct'])})</b> since purchase<br>"
+        f"{totals['count']} holdings &nbsp;·&nbsp; top three are "
+        f"{totals['top_three']:.0f}% of the total"
+        + (f" &nbsp;·&nbsp; USD/TRY {totals['usd_try']:.2f}" if totals.get("usd_try") else "")
+        + "</span></div>"
+    )
+
+    # The holdings themselves.
+    body = []
+    for row in rows:
+        body.append(
+            "<tr>"
+            f"<td class='tk'>{escape(row['name'])}</td>"
+            f"<td class='sym'>{escape(row['symbol'])}</td>"
+            f"<td>{row['quantity']:,.4f}".rstrip("0").rstrip(".") + "</td>"
+            f"<td>{row['buy_price']:,.4f}".rstrip("0").rstrip(".") + "</td>"
+            f"<td>{row['price']:,.4f}".rstrip("0").rstrip(".") + "</td>"
+            f"<td>{money(row['value'], currency)}</td>"
+            f"<td class='{change_class(row['profit'])}'>"
+            f"{'+' if row['profit'] >= 0 else '-'}{money(abs(row['profit']), currency)}</td>"
+            f"<td class='{change_class(row['profit_pct'])}'>{format_change(row['profit_pct'])}</td>"
+            f"<td>{row['weight']:.1f}%</td>"
+            "</tr>"
+        )
+
+    blocks.append(
+        "<div class='table-scroll'><table><thead><tr>"
+        "<th>Holding</th><th>Symbol</th><th>Qty</th><th>Bought at</th><th>Now</th>"
+        f"<th>Value</th><th>Profit</th><th>%</th><th>Weight</th>"
+        "</tr></thead><tbody>" + "".join(body) + "</tbody></table></div>"
+    )
+
+    # Portfolio risk: the part no broker shows you.
+    if totals.get("portfolio_vol") is not None:
+        saved = totals["diversification"]
+        blocks.append(
+            "<div class='tile-grid' style='margin-top:20px'>"
+            "<div class='tile'>"
+            "<div class='tile-label'>Portfolio volatility</div>"
+            f"<div class='tile-value'>{totals['portfolio_vol']:.1f}%</div>"
+            "<div class='tile-detail'>annualised, from how your holdings actually "
+            "move together</div></div>"
+            "<div class='tile'>"
+            "<div class='tile-label'>If they moved as one</div>"
+            f"<div class='tile-value'>{totals['weighted_avg_vol']:.1f}%</div>"
+            "<div class='tile-detail'>the weighted average of each holding's own "
+            "volatility</div></div>"
+            "<div class='tile'>"
+            "<div class='tile-label'>Diversification benefit</div>"
+            f"<div class='tile-value' style='color:{COLOR_CALM}'>{saved:.1f}pp</div>"
+            "<div class='tile-detail'>volatility removed by not moving in "
+            "lockstep</div></div>"
+            "</div>"
+        )
+
+    # The correlation grid: which holdings are genuinely different bets.
+    correlations = totals.get("correlations")
+    if correlations is not None and len(correlations) >= 2:
+        names = list(correlations.columns)
+        header = "".join(f"<th>{escape(n[:9])}</th>" for n in names)
+        grid = []
+        for row_name in names:
+            cells = []
+            for col_name in names:
+                value = correlations.loc[row_name, col_name]
+                # Tint by strength: darker means the pair moves together more.
+                shade = min(abs(value), 1.0)
+                background = (f"rgba(42,120,214,{shade * 0.55:.2f})" if value >= 0
+                              else f"rgba(227,73,72,{shade * 0.55:.2f})")
+                cells.append(f"<td style='background:{background}'>{value:.2f}</td>")
+            grid.append(f"<tr><td class='tk'>{escape(row_name[:14])}</td>{''.join(cells)}</tr>")
+
+        blocks.append(
+            "<h3 class='sub'>How your holdings move together</h3>"
+            "<div class='table-scroll'><table class='corr'><thead><tr><th></th>"
+            + header + "</tr></thead><tbody>" + "".join(grid) + "</tbody></table></div>"
+            f"<p class='fine'>Measured over the {totals['overlap_days']} days when every "
+            "holding traded. 1.00 means they move identically; 0 means they are "
+            "unrelated; below zero means they tend to move in opposite directions.</p>"
+        )
+
+    return "".join(blocks)
+
+
 def build_headlines_html(feeds):
     """One card per source, each a list of headlines that link out.
 
@@ -1445,7 +1798,7 @@ def build_correlation_hero(correlation):
 
 def render_page(rows, risk_rows, yield_data, correlation, bar_html, trend_html,
                 correlation_html, headlines_html, calendar_html, regime_html,
-                curve_html, watcher_html, watcher_chart, as_of):
+                curve_html, watcher_html, watcher_chart, portfolio_html, as_of):
     """Assemble every piece into one HTML file and save it."""
     generated = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M")
     bar_label = BAR_LABELS[BAR_COLUMN]
@@ -1542,6 +1895,12 @@ def render_page(rows, risk_rows, yield_data, correlation, bar_html, trend_html,
   <h2>{" vs ".join(TREND_TICKERS)} &mdash; last {TREND_DAYS} days, rebased to 100</h2>
   <div class="chart-scroll">{trend_html}</div>
   <p class="note"><b>Why both lines start at 100.</b> {EXPLANATIONS['trend']}</p>
+</section>
+
+<section class="card">
+  <h2>Your portfolio</h2>
+  {portfolio_html}
+  <p class="note"><b>What the risk numbers mean.</b> {EXPLANATIONS['portfolio']}</p>
 </section>
 
 <section class="card">
@@ -1687,6 +2046,14 @@ def main():
         elif not feed["items"]:
             print(f"WARNING: {feed['source']} returned no recent headlines")
 
+    print("Reading positions.json...")
+    settings, holdings, position_problems = load_positions(POSITIONS_PATH)
+    for problem in position_problems:
+        print(f"POSITIONS: {problem}")
+    portfolio_rows, portfolio_totals, pricing_problems = build_portfolio(settings, holdings)
+    for problem in pricing_problems:
+        print(f"POSITIONS: {problem}")
+
     print("Reading calendar.json...")
     calendar_events, calendar_problems = load_calendar(CALENDAR_PATH)
     for problem in calendar_problems:
@@ -1722,6 +2089,9 @@ def main():
         curve_html=build_curve_chart(curve_series),
         watcher_html=build_watcher_html(composite, scores),
         watcher_chart=build_watcher_chart(composite),
+        portfolio_html=build_portfolio_html(settings, portfolio_rows,
+                                            portfolio_totals,
+                                            position_problems + pricing_problems),
         as_of=as_of,
     )
 

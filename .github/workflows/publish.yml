@@ -27,6 +27,16 @@ on:
     # saving would drift by an hour twice a year and need this line edited.
     - cron: "0 3 * * 1-5"
 
+  # Rebuild whenever the holdings or the calendar are edited on GitHub, so a
+  # change to positions.json shows up on the dashboard about a minute later
+  # rather than waiting until the next morning.
+  push:
+    branches: [main]
+    paths:
+      - "positions.json"
+      - "calendar.json"
+      - "brief.py"
+
   # Adds a "Run workflow" button on the Actions tab, so you can trigger a run
   # yourself instead of waiting until tomorrow morning.
   workflow_dispatch:
