@@ -39,6 +39,7 @@ A NOTE FOR THE R USER
 
 import io                         # lets pandas read text as if it were a file
 import json                       # reads calendar.json
+import re                         # word-boundary matching for holdings tagging
 import sys                        # lets the script report failure to GitHub
 from datetime import date, datetime, timedelta
 from html import escape           # makes outside text safe to place in a web page
@@ -98,11 +99,33 @@ TIMEZONE = ZoneInfo("Europe/Istanbul")
 # card permanently empty and make a quiet central bank look like a broken feed.
 # A news wire publishes hourly, so anything over a week old there is stale.
 # Each headline carries its date, so you can always see how old the news is.
+# (name shown, address, how many days back, which chip it belongs to)
 FEEDS = [
-    ("Federal Reserve", "https://www.federalreserve.gov/feeds/press_monetary.xml", 90),
-    ("CNBC Economy", "https://www.cnbc.com/id/20910258/device/rss/rss.html", 7),
-    ("CNBC Finance", "https://www.cnbc.com/id/10000664/device/rss/rss.html", 7),
+    ("Federal Reserve", "https://www.federalreserve.gov/feeds/press_monetary.xml", 90, "macro"),
+    ("CNBC Economy", "https://www.cnbc.com/id/20910258/device/rss/rss.html", 7, "macro"),
+    ("CNBC Finance", "https://www.cnbc.com/id/10000664/device/rss/rss.html", 7, "markets"),
+    ("CNBC Investing", "https://www.cnbc.com/id/15839069/device/rss/rss.html", 5, "markets"),
+    ("CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/", 5, "crypto"),
+    ("CNBC Energy", "https://www.cnbc.com/id/19836768/device/rss/rss.html", 5, "energy"),
+    ("OilPrice", "https://oilprice.com/rss/main", 5, "energy"),
+    ("CNBC Technology", "https://www.cnbc.com/id/19854910/device/rss/rss.html", 5, "tech"),
 ]
+CATEGORIES = [("all", "All"), ("mine", "Mentions my holdings"), ("macro", "Macro"),
+              ("markets", "Markets"), ("crypto", "Crypto"), ("energy", "Energy"),
+              ("tech", "Tech / AI")]
+
+# Extra words that mean a story concerns a holding even without naming its ticker.
+# Kept small on purpose: a loose list tags everything, and a badge that appears on
+# every headline tells you nothing.
+HOLDING_ALIASES = {
+    "MP": ["rare earth", "rare earths"],
+    "AMD": ["advanced micro"],
+    "LITE": ["lumentum"],
+    "CHZ-USD": ["chiliz"],
+    "INJ-USD": ["injective"],
+    "XAUT-USD": ["gold", "bullion"],
+    "USDT-USD": ["tether", "stablecoin"],
+}
 HEADLINES_PER_FEED = 6
 FEED_TIMEOUT_SECONDS = 20
 
@@ -1120,7 +1143,7 @@ def measure_portfolio_risk(rows, returns_by_name):
 # NEWS AND CALENDAR
 # ---------------------------------------------------------------------------
 
-def fetch_feed(name, url, max_age_days):
+def fetch_feed(name, url, max_age_days, category):
     """Download one RSS feed and return its recent entries.
 
     Two details worth understanding.
@@ -1145,7 +1168,7 @@ def fetch_feed(name, url, max_age_days):
         response.raise_for_status()   # turns a 404 or 500 into an error we catch
     except requests.RequestException as error:
         # One dead feed must never take the rest of the page down with it.
-        return {"source": name, "items": [], "error": str(error)[:140]}
+        return {"source": name, "category": category, "items": [], "error": str(error)[:140]}
 
     parsed = feedparser.parse(response.content)
     cutoff = datetime.now() - timedelta(days=max_age_days)
@@ -1174,12 +1197,13 @@ def fetch_feed(name, url, max_age_days):
         if len(items) >= HEADLINES_PER_FEED:
             break
 
-    return {"source": name, "items": items, "error": None}
+    return {"source": name, "category": category, "items": items, "error": None}
 
 
 def fetch_headlines():
     """Fetch every configured feed."""
-    return [fetch_feed(name, url, max_age) for name, url, max_age in FEEDS]
+    return [fetch_feed(name, url, max_age, category)
+            for name, url, max_age, category in FEEDS]
 
 
 # The fields every calendar entry must have before the page will show it.
@@ -1525,6 +1549,13 @@ footer { color: #898781; font-size: 13px; margin-top: 28px; }
 .fine { color: #898781; font-size: 13px; margin: 8px 0 0; }
 
 /* News */
+.chips { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.chip { border: 1px solid #e1e0d9; background: #fcfcfb; color: #52514e; font-size: 13px;
+        padding: 5px 12px; border-radius: 999px; cursor: pointer; font-family: inherit; }
+.chip:hover { border-color: #898781; }
+.chip.on { background: #0b0b0b; color: #fcfcfb; border-color: #0b0b0b; }
+.mine-badge { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 999px;
+              background: #e8f0fb; color: #185ea8; margin: 4px 4px 0 0; font-weight: 600; }
 .feed-grid { display: grid; gap: 18px; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); }
 .feed h3 { font-size: 13px; margin: 0 0 10px; color: #185ea8; font-weight: 600;
            letter-spacing: 0.02em; }
@@ -2125,7 +2156,30 @@ def build_journal_html(entries, resolved, open_calls, problems):
     return "".join(blocks)
 
 
-def build_headlines_html(feeds):
+def holdings_mentioned(title, rows):
+    """Which of your holdings a headline appears to be about.
+
+    Matches on the ticker as a whole word, the holding's name, and a short list
+    of aliases. Word boundaries matter: without them "MP" would match inside
+    "important" and every story would carry a badge, which is the same as no
+    badge at all.
+    """
+    found = []
+    lowered = title.lower()
+    for row in rows:
+        symbol = row["symbol"].split("-")[0].split(".")[0]
+        needles = [symbol.lower(), row["name"].lower()]
+        needles += HOLDING_ALIASES.get(row["symbol"], [])
+        for needle in needles:
+            if len(needle) < 2:
+                continue
+            if re.search(rf"\b{re.escape(needle)}\b", lowered):
+                found.append(row["name"])
+                break
+    return sorted(set(found))
+
+
+def build_headlines_html(feeds, rows):
     """One card per source, each a list of headlines that link out.
 
     Note escape() on every piece of feed text. Headlines are written by someone
@@ -2134,30 +2188,62 @@ def build_headlines_html(feeds):
     markup into it. escape() turns those characters into harmless text. Treat
     anything fetched from outside as data to display, never as code to run.
     """
-    cards = []
+    # One stream rather than one card per source, so the chips can filter across
+    # everything at once. Newest first.
+    items = []
+    broken = []
     for feed in feeds:
         if feed["error"]:
-            body = f"<p class='missing'>Could not load this feed: {escape(feed['error'])}</p>"
-        elif not feed["items"]:
-            body = "<p class='missing'>No headlines in the last few days.</p>"
-        else:
-            rows = []
-            for item in feed["items"]:
-                when = item["published"].strftime("%d %b") if item["published"] else ""
-                rows.append(
-                    "<li>"
-                    f"<a href='{escape(item['link'], quote=True)}' target='_blank' "
-                    f"rel='noopener noreferrer'>{escape(item['title'])}</a>"
-                    # The card heading already names the source, so each row
-                    # only needs its date.
-                    f"<span class='when'>{when}</span>"
-                    "</li>"
-                )
-            body = "<ul class='heads'>" + "".join(rows) + "</ul>"
+            broken.append(f"{feed['source']}: {feed['error']}")
+            continue
+        for item in feed["items"]:
+            mine = holdings_mentioned(item["title"], rows)
+            items.append({**item, "source": feed["source"],
+                          "category": feed["category"], "mine": mine})
 
-        cards.append(f"<div class='feed'><h3>{escape(feed['source'])}</h3>{body}</div>")
+    items.sort(key=lambda i: i["published"] or datetime.min, reverse=True)
 
-    return "<div class='feed-grid'>" + "".join(cards) + "</div>"
+    if not items:
+        return "<p class='missing'>No headlines could be loaded.</p>"
+
+    chips = "".join(
+        f"<button class='chip{' on' if key == 'all' else ''}' data-filter='{key}'>"
+        f"{escape(label)}</button>" for key, label in CATEGORIES)
+
+    lines = []
+    for item in items:
+        when = item["published"].strftime("%d %b") if item["published"] else ""
+        badges = "".join(f"<span class='mine-badge'>{escape(name)}</span>"
+                         for name in item["mine"])
+        lines.append(
+            f"<li data-cat='{item['category']}' data-mine='{'1' if item['mine'] else '0'}'>"
+            f"<a href='{escape(item['link'], quote=True)}' target='_blank' "
+            f"rel='noopener noreferrer'>{escape(item['title'])}</a>"
+            f"<span class='when'>{escape(item['source'])} &middot; {when}</span>"
+            f"{badges}</li>")
+
+    note = ""
+    if broken:
+        note = ("<p class='fine'>Feeds unavailable this run: "
+                + escape(", ".join(b.split(":")[0] for b in broken)) + "</p>")
+
+    tagged = sum(1 for i in items if i["mine"])
+    return (
+        f"<div class='chips'>{chips}</div>"
+        f"<p class='fine'>{len(items)} headlines from {len(feeds) - len(broken)} sources"
+        f" &middot; {tagged} mention something you hold</p>"
+        f"<ul class='heads' id='newslist'>{''.join(lines)}</ul>{note}"
+        "<script>(function(){"
+        "var chips=document.querySelectorAll('.chip');"
+        "var items=document.querySelectorAll('#newslist li');"
+        "chips.forEach(function(c){c.addEventListener('click',function(){"
+        "chips.forEach(function(x){x.classList.remove('on')});c.classList.add('on');"
+        "var f=c.getAttribute('data-filter');"
+        "items.forEach(function(li){"
+        "var show = f==='all' || (f==='mine' ? li.getAttribute('data-mine')==='1'"
+        " : li.getAttribute('data-cat')===f);"
+        "li.style.display = show ? '' : 'none';});});});})();</script>"
+    )
 
 
 def build_calendar_html(events, problems):
@@ -2573,7 +2659,7 @@ def main():
         bar_html=build_bar_chart(dated),
         trend_html=build_trend_chart(rebased_trend(rows, TREND_TICKERS, TREND_DAYS)),
         correlation_html=build_correlation_chart(correlation),
-        headlines_html=build_headlines_html(feeds),
+        headlines_html=build_headlines_html(feeds, portfolio_rows),
         calendar_html=build_calendar_html(calendar_events, calendar_problems),
         regime_html=build_regime_html(regime),
         curve_html=build_curve_chart(curve_series),
