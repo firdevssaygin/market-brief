@@ -114,6 +114,12 @@ CATEGORIES = [("all", "All"), ("mine", "Mentions my holdings"), ("macro", "Macro
               ("markets", "Markets"), ("crypto", "Crypto"), ("energy", "Energy"),
               ("tech", "Tech / AI")]
 
+# One colour per news category, taken in order from the same colourblind-checked
+# palette as the charts. The category name is always printed beside the colour,
+# never carried by the colour alone.
+CATEGORY_COLORS = {"macro": "#2a78d6", "markets": "#eb6834", "crypto": "#1baf7a",
+                   "energy": "#eda100", "tech": "#e87ba4"}
+
 # Extra words that mean a story concerns a holding even without naming its ticker.
 # Kept small on purpose: a loose list tags everything, and a badge that appears on
 # every headline tells you nothing.
@@ -1453,6 +1459,25 @@ def build_correlation_chart(correlation):
 
 # Kept as a plain (non-f) string because CSS is full of { } braces, which would
 # confuse an f-string. The values get slotted in further down instead.
+TAB_SCRIPT = """<script>(function(){
+  var tabs = document.querySelectorAll('.tab');
+  var panels = document.querySelectorAll('.panel');
+  function show(name){
+    tabs.forEach(function(t){ t.classList.toggle('on', t.dataset.panel === name); });
+    panels.forEach(function(p){ p.classList.toggle('on', p.id === 'panel-' + name); });
+    window.scrollTo({top: 0});
+  }
+  tabs.forEach(function(t){
+    t.addEventListener('click', function(){
+      show(t.dataset.panel);
+      history.replaceState(null, '', '#' + t.dataset.panel);   // so a link keeps the tab
+    });
+  });
+  var wanted = location.hash.replace('#','');
+  if (wanted && document.getElementById('panel-' + wanted)) { show(wanted); }
+})();</script>"""
+
+
 STYLES = """
 :root { color-scheme: light; }
 * { box-sizing: border-box; }
@@ -1547,6 +1572,31 @@ footer { color: #898781; font-size: 13px; margin-top: 28px; }
 .corr td { text-align: center; font-variant-numeric: tabular-nums; font-size: 13px; }
 .corr th { text-align: center; }
 .fine { color: #898781; font-size: 13px; margin: 8px 0 0; }
+
+/* Tabs */
+.tabs { display: flex; gap: 4px; flex-wrap: wrap; margin: 0 0 22px;
+        border-bottom: 1px solid #e1e0d9; }
+.tab { border: none; background: none; font-family: inherit; font-size: 15px;
+       color: #52514e; padding: 10px 16px; cursor: pointer; border-radius: 8px 8px 0 0;
+       border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.tab:hover { color: #0b0b0b; background: #f0efec; }
+.tab.on { color: #0b0b0b; font-weight: 600; border-bottom-color: #2a78d6; }
+.panel { display: none; }
+.panel.on { display: block; }
+
+/* News cards */
+.ngrid { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px;
+         grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+.ncard { background: #fcfcfb; border: 1px solid rgba(11,11,11,0.08); border-left: 3px solid;
+         border-radius: 10px; padding: 12px 14px; }
+.ncard a { color: #0b0b0b; text-decoration: none; font-size: 14px; line-height: 1.4;
+           display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+           overflow: hidden; }
+.ncard a:hover { text-decoration: underline; }
+.nmeta { display: flex; align-items: center; gap: 6px; margin-bottom: 7px; flex-wrap: wrap; }
+.ndot { width: 7px; height: 7px; border-radius: 50%; }
+.ncat { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+.nsrc { font-size: 11px; color: #898781; margin-left: auto; }
 
 /* News */
 .chips { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
@@ -2215,11 +2265,17 @@ def build_headlines_html(feeds, rows):
         when = item["published"].strftime("%d %b") if item["published"] else ""
         badges = "".join(f"<span class='mine-badge'>{escape(name)}</span>"
                          for name in item["mine"])
+        color = CATEGORY_COLORS.get(item["category"], COLOR_MUTED)
+        label = dict(CATEGORIES).get(item["category"], item["category"])
         lines.append(
-            f"<li data-cat='{item['category']}' data-mine='{'1' if item['mine'] else '0'}'>"
+            f"<li class='ncard' data-cat='{item['category']}' "
+            f"data-mine='{'1' if item['mine'] else '0'}' "
+            f"style='border-left-color:{color}'>"
+            f"<div class='nmeta'><span class='ndot' style='background:{color}'></span>"
+            f"<span class='ncat' style='color:{color}'>{escape(label)}</span>"
+            f"<span class='nsrc'>{escape(item['source'])} &middot; {when}</span></div>"
             f"<a href='{escape(item['link'], quote=True)}' target='_blank' "
             f"rel='noopener noreferrer'>{escape(item['title'])}</a>"
-            f"<span class='when'>{escape(item['source'])} &middot; {when}</span>"
             f"{badges}</li>")
 
     note = ""
@@ -2232,7 +2288,7 @@ def build_headlines_html(feeds, rows):
         f"<div class='chips'>{chips}</div>"
         f"<p class='fine'>{len(items)} headlines from {len(feeds) - len(broken)} sources"
         f" &middot; {tagged} mention something you hold</p>"
-        f"<ul class='heads' id='newslist'>{''.join(lines)}</ul>{note}"
+        f"<ul class='ngrid' id='newslist'>{''.join(lines)}</ul>{note}"
         "<script>(function(){"
         "var chips=document.querySelectorAll('.chip');"
         "var items=document.querySelectorAll('#newslist li');"
@@ -2363,6 +2419,16 @@ def render_page(rows, risk_rows, yield_data, correlation, bar_html, trend_html,
      page generated {generated} Istanbul time</p>
 </header>
 
+<div class="tabs">
+  <button class="tab on" data-panel="market">Market</button>
+  <button class="tab" data-panel="portfolio">Portfolio</button>
+  <button class="tab" data-panel="news">News</button>
+  <button class="tab" data-panel="calendar">Calendar</button>
+  <button class="tab" data-panel="journal">Journal</button>
+</div>
+
+<div class="panel on" id="panel-market">
+
 <section class="card">
   <h2>Risk watcher</h2>
   {watcher_html}
@@ -2439,17 +2505,21 @@ def render_page(rows, risk_rows, yield_data, correlation, bar_html, trend_html,
   <p class="note"><b>Why both lines start at 100.</b> {EXPLANATIONS['trend']}</p>
 </section>
 
+</div><div class="panel" id="panel-portfolio">
+
 <section class="card">
   <h2>Your portfolio</h2>
   {portfolio_html}
   <p class="note"><b>What the risk numbers mean.</b> {EXPLANATIONS['portfolio']}</p>
 </section>
 
+
 <section class="card">
-  <h2>Upcoming US releases</h2>
-  {calendar_html}
-  <p class="note"><b>Why a calendar belongs here.</b> {EXPLANATIONS['calendar']}</p>
+  <h2>Live charts &mdash; your holdings</h2>
+  {tv_chart}
+  <p class="note"><b>Why this panel is different.</b> {EXPLANATIONS['tradingview']}</p>
 </section>
+</div><div class="panel" id="panel-journal">
 
 <section class="card">
   <h2>Decision journal</h2>
@@ -2457,22 +2527,30 @@ def render_page(rows, risk_rows, yield_data, correlation, bar_html, trend_html,
   <p class="note"><b>Why calibration, not accuracy.</b> {EXPLANATIONS['journal']}</p>
 </section>
 
-<section class="card">
-  <h2>Live charts &mdash; your holdings</h2>
-  {tv_chart}
-  <p class="note"><b>Why this panel is different.</b> {EXPLANATIONS['tradingview']}</p>
-</section>
 
+</div><div class="panel" id="panel-calendar">
+
+<section class="card">
+  <h2>Upcoming US releases</h2>
+  {calendar_html}
+  <p class="note"><b>Why a calendar belongs here.</b> {EXPLANATIONS['calendar']}</p>
+</section>
 <section class="card">
   <h2>Economic calendar</h2>
   {tv_calendar}
 </section>
+
+</div><div class="panel" id="panel-news">
 
 <section class="card">
   <h2>Headlines</h2>
   {headlines_html}
   <p class="note"><b>Links only, on purpose.</b> {EXPLANATIONS['headlines']}</p>
 </section>
+
+</div>
+
+{TAB_SCRIPT}
 
 <footer>
   Prices and yields from Yahoo Finance via the yfinance package. Headlines are
