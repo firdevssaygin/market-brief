@@ -2665,6 +2665,87 @@ def build_top_news_html(feeds, rows, limit=6):
     return "<ul class='ngrid'>" + "".join(cards) + "</ul>"
 
 
+def build_portfolio_chart(totals):
+    """How the portfolio's value has moved, with range buttons.
+
+    Compounding the daily returns gives a growth path; scaling it so the final
+    point equals today's actual value turns that path into money. Note what this
+    is: today's holdings carried backwards through past prices - what this
+    portfolio would have been worth - not a record of your account, which held
+    different things at different times.
+    """
+    daily = totals.get("daily")
+    if daily is None or daily.empty:
+        return "<p class='missing'>Not enough history to chart the portfolio.</p>"
+
+    growth = (daily / 100 + 1).cumprod()
+    values = totals["value"] * growth / growth.iloc[-1]
+
+    figure = go.Figure(
+        # .tolist() matters: plotly encodes numpy arrays as binary blobs, which
+        # the rescaling script below cannot read. A plain list stays plain JSON.
+        go.Scatter(x=[str(d.date()) for d in values.index],
+                   y=[float(v) for v in values.values], mode="lines",
+                   line=dict(color=COLOR_UP, width=2),
+                   fill="tozeroy", fillcolor="rgba(42,120,214,0.07)",
+                   hovertemplate="%{y:,.0f}<extra></extra>")
+    )
+    figure.update_layout(
+        **{**BASE_LAYOUT, "margin": dict(l=8, r=8, t=34, b=8)},
+        height=330, hovermode="x unified", showlegend=False,
+        xaxis=dict(
+            showgrid=False, tickfont=dict(color=COLOR_MUTED), linecolor=COLOR_GRID,
+            # Plotly's own range buttons - no custom widget needed.
+            rangeselector=dict(
+                buttons=[
+                    dict(count=7, label="Week", step="day", stepmode="backward"),
+                    dict(count=1, label="Month", step="month", stepmode="backward"),
+                    dict(count=3, label="Quarter", step="month", stepmode="backward"),
+                    dict(count=1, label="Year", step="year", stepmode="backward"),
+                    dict(label="All", step="all"),
+                ],
+                bgcolor=COLOR_SURFACE, activecolor="#e8f0fb",
+                bordercolor=COLOR_GRID, borderwidth=1,
+                font=dict(color=COLOR_INK, size=12), x=0, y=1.18,
+            ),
+        ),
+        yaxis=dict(gridcolor=COLOR_GRID, griddash="solid",
+                   tickfont=dict(color=COLOR_MUTED), tickprefix="$"),
+    )
+
+    # A fixed div id so the snippet below can find this chart, and rescale the
+    # vertical axis whenever a range button changes the dates on view. Without
+    # it, a week of movement is squashed flat against a year-sized axis.
+    chart = figure.to_html(full_html=False, include_plotlyjs=False,
+                           div_id="portfolio-chart",
+                           config={"displayModeBar": False, "responsive": True})
+    return chart + """
+<script>(function(){
+  var el = document.getElementById('portfolio-chart');
+  if (!el) { return; }
+  el.on('plotly_relayout', function(ev){
+    // A range button reports xaxis.range as one array; dragging reports the two
+    // ends separately. Both forms have to be handled or the rescale never fires.
+    var from = ev['xaxis.range[0]'], to = ev['xaxis.range[1]'];
+    if (from === undefined && Array.isArray(ev['xaxis.range'])) {
+      from = ev['xaxis.range'][0]; to = ev['xaxis.range'][1];
+    }
+    var d = el.data[0];
+    if (from === undefined && !ev['xaxis.autorange']) { return; }
+    var lo = from ? new Date(from) : null, hi = to ? new Date(to) : null;
+    var seen = [];
+    for (var i = 0; i < d.x.length; i++) {
+      var t = new Date(d.x[i]);
+      if ((!lo || t >= lo) && (!hi || t <= hi)) { seen.push(d.y[i]); }
+    }
+    if (seen.length < 2) { return; }
+    var min = Math.min.apply(null, seen), max = Math.max.apply(null, seen);
+    var pad = (max - min) * 0.12 || 1;
+    Plotly.relayout(el, {'yaxis.range': [min - pad, max + pad]});
+  });
+})();</script>"""
+
+
 def build_headlines_html(feeds, rows):
     """One card per source, each a list of headlines that link out.
 
@@ -2859,7 +2940,7 @@ def render_page(rows, risk_rows, yield_data, correlation, bar_html, trend_html,
                 etf_table, yield_card, correlation_hero,
                 correlation_html, headlines_html, calendar_html, regime_html,
                 curve_html, watcher_html, watcher_chart, portfolio_html,
-                tv_chart, tv_calendar, earnings_html, home_summary,
+                tv_chart, tv_calendar, earnings_html, home_summary, portfolio_chart,
                 top_news, learn_html, as_of):
     """Assemble every piece into one HTML file and save it."""
     generated = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M")
@@ -2955,6 +3036,11 @@ def render_page(rows, risk_rows, yield_data, correlation, bar_html, trend_html,
 </section>
 
 </div><div class="panel" id="panel-portfolio">
+
+<section class="card">
+  <h2>Your portfolio over time</h2>
+  <div class="chart-scroll">{portfolio_chart}</div>
+</section>
 
 <section class="card">
   <h2>Your portfolio</h2>
@@ -3197,6 +3283,7 @@ def main():
         learn_html=build_learn_html(),
         tv_chart=build_tradingview_chart(portfolio_rows),
         tv_calendar=build_tradingview_calendar(),
+        portfolio_chart=build_portfolio_chart(portfolio_totals),
         portfolio_html=build_portfolio_html(settings, portfolio_rows,
                                             portfolio_totals,
                                             position_problems + pricing_problems),
