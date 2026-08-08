@@ -116,7 +116,10 @@ CALENDAR_EVENTS_SHOWN = 6
 # Google Sheet, so you can edit them from a phone without touching GitHub. If it
 # is left empty, positions.json is used instead. The sheet wins when both exist.
 POSITIONS_PATH = Path(__file__).parent / "positions.json"
-POSITIONS_CSV_URL = ""
+POSITIONS_CSV_URL = (
+    "https://docs.google.com/spreadsheets/d/e/2PACX-1vTOB5Zv19hu0C36dJqp4UN5"
+    "-V1Y6v2t_vLbzub2mMgqd8RdWh7Tp6KB02aT0gvInl7s0HacypbTzNVA/pub?output=csv"
+)
 
 # --- Risk regime -----------------------------------------------------------
 # Four free indicators that describe the environment rather than any one fund.
