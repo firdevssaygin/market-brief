@@ -48,6 +48,7 @@ from pathlib import Path          # a tidier way to handle file paths than raw t
 from zoneinfo import ZoneInfo     # timezone support, built into Python
 
 import feedparser                 # understands RSS news feeds
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import requests                   # downloads those feeds
@@ -399,6 +400,23 @@ EXPLANATIONS = {
         "reliably produces days worse than the previous worst. And this applies "
         "today's holdings to past returns; it is what this portfolio would have "
         "done, not what yours did."
+    ),
+    "factors": (
+        "Rather than asking why your portfolio moved on any given day, this asks "
+        "how much of its movement over the year came from forces that move whole "
+        "swathes of the market at once. Each number is a sensitivity: how much your "
+        "portfolio moved when that force moved by one unit, with the others held "
+        "still. Above one means you amplify it; near zero means you are largely "
+        "unaffected; below zero means you move against it. "
+        "The value-versus-growth reading is worth understanding, because a negative "
+        "number there does not mean you dislike value - it means you lean toward "
+        "growth, since the factor is constructed as value minus growth and moving "
+        "against it is the same as moving with growth. "
+        "Three warnings. Sensitivities are not causes: these factors overlap heavily "
+        "with each other, so their individual numbers shift depending on which ones "
+        "are included. They are averages over the whole period and change over time, "
+        "often sharply in a crisis. And a year of daily data is a short sample from "
+        "which to conclude anything with confidence."
     ),
     "journal": (
         "The only panel here that improves your judgment rather than your "
@@ -1134,6 +1152,7 @@ def build_portfolio(settings, holdings):
         "count": len(rows),
     }
     totals.update(measure_portfolio_risk(rows, returns_by_name))
+    totals["factors"] = factor_decomposition(totals.get("daily"))
     return rows, totals, problems
 
 
@@ -1229,6 +1248,7 @@ def measure_portfolio_risk(rows, returns_by_name):
     shortfall = float(tail.mean()) if not tail.empty else None
 
     return {
+        "daily": daily,
         "worst_day": worst_value,
         "worst_date": worst_date,
         "best_day": float(daily.max()),
@@ -1241,6 +1261,83 @@ def measure_portfolio_risk(rows, returns_by_name):
         "correlations": aligned.corr(),
         "overlap_days": len(aligned),
         "contributions": contributions,
+    }
+
+
+# Factor proxies, each built from free ETFs. A factor is a shared driver of
+# returns: rather than asking "why did my portfolio move", it asks "how much of
+# the move was the market, how much was small companies beating large ones, and
+# so on". Differences (small minus large) isolate the tilt from the market move
+# they both contain.
+FACTOR_RECIPES = [
+    ("Market", ["SPY"], None, "the market as a whole"),
+    ("Small vs large", ["IWM"], ["SPY"], "small companies beating large ones"),
+    ("Value vs growth", ["IWD"], ["IWF"], "value beating growth"),
+    ("Momentum", ["MTUM"], ["SPY"], "recent winners continuing to win"),
+    ("Crypto", ["BTC-USD"], None, "bitcoin, as the crypto market's proxy"),
+    ("Gold", ["GLD"], None, "the gold price"),
+]
+
+
+def factor_decomposition(portfolio_daily):
+    """Explain the portfolio's daily moves as a mix of shared market forces.
+
+    This fits a straight line through several variables at once - a multiple
+    regression, the same tool as lm() in R. Each coefficient says how much the
+    portfolio moved when that factor moved by one unit, holding the others
+    still. R-squared says what share of the day-to-day variation the whole set
+    accounts for; whatever is left over is specific to your particular holdings
+    rather than to any broad force.
+    """
+    if portfolio_daily is None or len(portfolio_daily) < 60:
+        return None
+
+    columns = {}
+    for name, longs, shorts, _ in FACTOR_RECIPES:
+        series = None
+        for ticker in longs:
+            closes = fetch_closes(ticker, "2y")
+            if closes is None:
+                series = None
+                break
+            series = closes.pct_change() * 100
+        if series is None:
+            continue
+        if shorts:
+            for ticker in shorts:
+                closes = fetch_closes(ticker, "2y")
+                if closes is None:
+                    series = None
+                    break
+                series = series - closes.pct_change() * 100
+        if series is not None:
+            columns[name] = series.dropna()
+
+    if len(columns) < 2:
+        return None
+
+    frame = pd.concat([portfolio_daily.rename("portfolio"), *[
+        s.rename(n) for n, s in columns.items()]], axis=1, join="inner").dropna()
+    if len(frame) < 60:
+        return None
+
+    y = frame["portfolio"].values
+    names = [c for c in frame.columns if c != "portfolio"]
+    # A column of ones lets the line have an intercept, as lm() does by default.
+    X = np.column_stack([np.ones(len(frame))] + [frame[n].values for n in names])
+
+    coefficients, *_ = np.linalg.lstsq(X, y, rcond=None)
+    predicted = X @ coefficients
+    residual = y - predicted
+    total_variation = float(((y - y.mean()) ** 2).sum())
+    r_squared = 1 - float((residual ** 2).sum()) / total_variation if total_variation else None
+
+    meanings = {name: meaning for name, _, _, meaning in FACTOR_RECIPES}
+    return {
+        "days": len(frame),
+        "r_squared": r_squared * 100 if r_squared is not None else None,
+        "factors": [{"name": n, "beta": float(b), "meaning": meanings.get(n, "")}
+                    for n, b in zip(names, coefficients[1:])],
     }
 
 
@@ -2093,6 +2190,33 @@ def build_portfolio_html(settings, rows, totals, problems):
             "carrying more risk than its size implies - either because it is more "
             "volatile, or because it moves with the rest of what you own.</p>")
 
+    # What broad forces actually drive the portfolio.
+    factors = totals.get("factors")
+    if factors and factors.get("factors"):
+        ordered = sorted(factors["factors"], key=lambda f: -abs(f["beta"]))
+        widest = max(abs(f["beta"]) for f in ordered) or 1
+        bars = []
+        for item in ordered:
+            beta = item["beta"]
+            color = COLOR_UP if beta >= 0 else COLOR_DOWN
+            bars.append(
+                "<div class='comp'>"
+                f"<div class='comp-name'>{escape(item['name'])}</div>"
+                "<div class='comp-track'>"
+                f"<div class='comp-fill' style='width:{abs(beta) / widest * 100:.0f}%;"
+                f"background:{color}'></div></div>"
+                f"<div class='comp-score'>{beta:+.2f}</div>"
+                f"<div class='comp-word fine' style='font-weight:400'>"
+                f"{escape(item['meaning'])}</div></div>")
+
+        blocks.append(
+            "<h3 class='sub'>What actually drives your returns</h3>"
+            + "".join(bars)
+            + f"<p class='fine'>These six forces account for "
+              f"<b>{factors['r_squared']:.0f}%</b> of your day-to-day variation over "
+              f"{factors['days']} days. The rest is specific to your particular "
+              f"holdings rather than to any broad market force.</p>")
+
     # The correlation grid: which holdings are genuinely different bets.
     correlations = totals.get("correlations")
     if correlations is not None and len(correlations) >= 2:
@@ -2740,6 +2864,7 @@ def render_page(rows, risk_rows, yield_data, correlation, bar_html, trend_html,
   {portfolio_html}
   <p class="note"><b>What the risk numbers mean.</b> {EXPLANATIONS['portfolio']}</p>
   <p class="note"><b>On value-at-risk, and why it misleads people.</b> {EXPLANATIONS['drawdown']}</p>
+  <p class="note"><b>Reading the factor numbers.</b> {EXPLANATIONS['factors']}</p>
 </section>
 
 
