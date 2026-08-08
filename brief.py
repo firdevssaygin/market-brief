@@ -116,6 +116,15 @@ CALENDAR_EVENTS_SHOWN = 6
 # Google Sheet, so you can edit them from a phone without touching GitHub. If it
 # is left empty, positions.json is used instead. The sheet wins when both exist.
 POSITIONS_PATH = Path(__file__).parent / "positions.json"
+# The decision journal. A second published sheet - a separate tab, published
+# separately - or journal.json if this is left empty.
+JOURNAL_PATH = Path(__file__).parent / "journal.json"
+JOURNAL_CSV_URL = ""
+
+# Confidence buckets for the calibration table.
+CONFIDENCE_BUCKETS = [(50, 60), (60, 70), (70, 80), (80, 90), (90, 101)]
+
+
 # TradingView writes symbols differently again: it wants an exchange prefix.
 # Yahoo says AMD, TradingView says NASDAQ:AMD; Yahoo says CHZ-USD, and since you
 # trade on OKX the matching TradingView symbol is OKX:CHZUSDT. Anything not
@@ -319,6 +328,22 @@ EXPLANATIONS = {
         "added up. Profit is against your stated buy price and ignores commission, "
         "spread and tax, so it is the gross figure, not what you would actually "
         "walk away with."
+    ),
+    "journal": (
+        "The only panel here that improves your judgment rather than your "
+        "information. You write down what you expect <b>before</b> you find out, "
+        "with a number attached to how sure you are; once the horizon passes, the "
+        "script settles it against the prices that actually happened. "
+        "What it measures is not accuracy but <b>calibration</b>. Being right often "
+        "is easy - predict only the obvious. Being calibrated means that when you "
+        "say 70%, you are right about seven times in ten. Overconfidence, claiming "
+        "ninety and delivering sixty, is the most common and most expensive error in "
+        "forecasting, and it is invisible from the inside: memory quietly rewrites "
+        "what you thought you believed, which is exactly why the record has to be "
+        "written first and cannot be edited afterwards. "
+        "Confidence starts at 50 because 50% is a coin toss - it is the least sure "
+        "you can be about a two-sided question. If you would write 30%, you believe "
+        "the opposite at 70%: write that instead."
     ),
     "tradingview": (
         "Everything else on this page is computed when the page is built and then "
@@ -1923,6 +1948,183 @@ def build_tradingview_calendar():
     )
 
 
+# ---------------------------------------------------------------------------
+# DECISION JOURNAL
+# ---------------------------------------------------------------------------
+
+def load_journal():
+    """Read journal entries from the sheet if configured, else journal.json."""
+    if JOURNAL_CSV_URL:
+        try:
+            response = requests.get(JOURNAL_CSV_URL, timeout=FEED_TIMEOUT_SECONDS)
+            response.raise_for_status()
+            response.encoding = "utf-8"
+            frame = pd.read_csv(io.StringIO(response.text), sep=None, engine="python")
+        except Exception as error:
+            return [], [f"could not read the journal sheet: {type(error).__name__}"]
+        raw = frame.to_dict("records")
+    elif JOURNAL_PATH.exists():
+        try:
+            raw = json.loads(JOURNAL_PATH.read_text(encoding="utf-8")).get("entries", [])
+        except json.JSONDecodeError as error:
+            return [], [f"journal.json is not valid JSON - line {error.lineno}: {error.msg}"]
+    else:
+        return [], []
+
+    entries, problems = [], []
+    for position, row in enumerate(raw, start=2):
+        row = {str(k).strip().lower(): v for k, v in row.items()}
+        symbol = str(row.get("symbol", "")).strip()
+        if not symbol or symbol.lower() == "nan":
+            continue
+        try:
+            made_on = date.fromisoformat(str(row.get("date", ""))[:10])
+        except ValueError:
+            problems.append(f"entry {position} ({symbol}): date is not YYYY-MM-DD")
+            continue
+        direction = str(row.get("direction", "")).strip().lower()
+        if direction not in ("up", "down"):
+            problems.append(f"entry {position} ({symbol}): direction must be 'up' or 'down'")
+            continue
+        horizon = parse_number(row.get("horizon_days")) or 5
+        confidence = parse_number(row.get("confidence"))
+        if confidence is None or not 50 <= confidence <= 100:
+            problems.append(
+                f"entry {position} ({symbol}): confidence must be between 50 and 100. "
+                f"Below 50 means you believe the opposite - write that instead."
+            )
+            continue
+        entries.append({
+            "date": made_on, "symbol": symbol, "direction": direction,
+            "horizon": int(horizon), "confidence": confidence,
+            "note": str(row.get("note", "") or "").replace("nan", ""),
+        })
+    return entries, problems
+
+
+def score_journal(entries, today):
+    """Settle every prediction whose horizon has passed, against real prices."""
+    resolved, open_calls = [], []
+    for entry in entries:
+        due = entry["date"] + timedelta(days=entry["horizon"])
+        if due > today:
+            open_calls.append({**entry, "due": due})
+            continue
+
+        closes = fetch_closes(entry["symbol"], "2y")
+        if closes is None:
+            continue
+
+        # The close on or before the day the call was made, and on or before the
+        # day it came due. Using the prices that existed at those moments is the
+        # whole point - a prediction cannot be scored against a price it could
+        # have seen.
+        start = closes[closes.index.date <= entry["date"]]
+        end = closes[closes.index.date <= due]
+        if start.empty or end.empty:
+            continue
+
+        move = percent_change(end.iloc[-1], start.iloc[-1])
+        correct = (move > 0) if entry["direction"] == "up" else (move < 0)
+        resolved.append({**entry, "due": due, "move": move, "correct": correct})
+
+    return resolved, open_calls
+
+
+def calibration_table(resolved):
+    """Compare stated confidence with how often those calls were actually right.
+
+    This is the number that matters. Being right often is easy if you only
+    predict the obvious; being CALIBRATED means your 70%s come true about 70% of
+    the time. Overconfidence - claiming 90 and hitting 60 - is the most common
+    and most expensive failure in forecasting, and it is invisible without a
+    written record you cannot edit afterwards.
+    """
+    rows = []
+    for low, high in CONFIDENCE_BUCKETS:
+        bucket = [r for r in resolved if low <= r["confidence"] < high]
+        if not bucket:
+            continue
+        hit = sum(1 for r in bucket if r["correct"]) / len(bucket) * 100
+        stated = sum(r["confidence"] for r in bucket) / len(bucket)
+        rows.append({"label": f"{low}-{high - 1}%", "count": len(bucket),
+                     "stated": stated, "actual": hit, "gap": hit - stated})
+    return rows
+
+
+def build_journal_html(entries, resolved, open_calls, problems):
+    """Open calls, settled calls, and the calibration table."""
+    blocks = []
+    if problems:
+        listed = "".join(f"<li>{escape(p)}</li>" for p in problems)
+        blocks.append(f"<div class='warn'><b>journal needs attention</b><ul>{listed}</ul></div>")
+
+    if not entries:
+        return "".join(blocks) + (
+            "<p class='awaiting'><b>No predictions recorded yet.</b> Write down what you "
+            "expect <i>before</i> you find out, with a confidence level, and this panel "
+            "will settle it against real prices when the horizon passes. The point is not "
+            "to be right - it is to discover whether your 70% calls actually come true "
+            "seven times in ten. Almost nobody's do, and nobody finds out without a record "
+            "they cannot revise afterwards.</p>")
+
+    if resolved:
+        hit = sum(1 for r in resolved if r["correct"]) / len(resolved) * 100
+        blocks.append(
+            "<div class='hero-row'>"
+            f"<span class='hero'>{hit:.0f}%</span>"
+            f"<span class='hero-side'>of {len(resolved)} settled calls were right"
+            f"<br>{len(open_calls)} still open</span></div>"
+        )
+
+        table = calibration_table(resolved)
+        if table:
+            body = "".join(
+                "<tr>"
+                f"<td class='tk'>{r['label']}</td><td>{r['count']}</td>"
+                f"<td>{r['stated']:.0f}%</td><td>{r['actual']:.0f}%</td>"
+                f"<td class='{change_class(r['gap'])}'>{r['gap']:+.0f}pp</td></tr>"
+                for r in table)
+            blocks.append(
+                "<h3 class='sub'>Calibration &mdash; are you as sure as you think?</h3>"
+                "<div class='table-scroll'><table><thead><tr><th>You said</th>"
+                "<th>Calls</th><th>Average claimed</th><th>Actually right</th>"
+                "<th>Gap</th></tr></thead><tbody>" + body + "</tbody></table></div>"
+                "<p class='fine'>A negative gap means overconfidence: you were less right "
+                "than you claimed. Zero is the target, not 100% accuracy.</p>")
+
+        rows = "".join(
+            "<tr>"
+            f"<td class='tk'>{escape(r['symbol'])}</td>"
+            f"<td>{r['direction']}</td><td>{r['confidence']:.0f}%</td>"
+            f"<td>{r['date']}</td><td>{r['due']}</td>"
+            f"<td class='{change_class(r['move'])}'>{format_change(r['move'])}</td>"
+            f"<td style='color:{COLOR_CALM if r['correct'] else COLOR_STRESSED};font-weight:600'>"
+            f"{'right' if r['correct'] else 'wrong'}</td>"
+            f"<td class='fine'>{escape(r['note'][:60])}</td></tr>"
+            for r in sorted(resolved, key=lambda r: r["due"], reverse=True)[:12])
+        blocks.append(
+            "<h3 class='sub'>Settled</h3><div class='table-scroll'><table><thead><tr>"
+            "<th>Symbol</th><th>Call</th><th>Confidence</th><th>Made</th><th>Due</th>"
+            "<th>Actual move</th><th></th><th>Note</th></tr></thead><tbody>"
+            + rows + "</tbody></table></div>")
+
+    if open_calls:
+        rows = "".join(
+            "<tr>"
+            f"<td class='tk'>{escape(o['symbol'])}</td><td>{o['direction']}</td>"
+            f"<td>{o['confidence']:.0f}%</td><td>{o['due']}</td>"
+            f"<td class='fine'>{escape(o['note'][:70])}</td></tr>"
+            for o in sorted(open_calls, key=lambda o: o["due"]))
+        blocks.append(
+            "<h3 class='sub'>Open &mdash; not yet settled</h3>"
+            "<div class='table-scroll'><table><thead><tr><th>Symbol</th><th>Call</th>"
+            "<th>Confidence</th><th>Settles</th><th>Note</th></tr></thead><tbody>"
+            + rows + "</tbody></table></div>")
+
+    return "".join(blocks)
+
+
 def build_headlines_html(feeds):
     """One card per source, each a list of headlines that link out.
 
@@ -2052,7 +2254,7 @@ def build_correlation_hero(correlation):
 def render_page(rows, risk_rows, yield_data, correlation, bar_html, trend_html,
                 correlation_html, headlines_html, calendar_html, regime_html,
                 curve_html, watcher_html, watcher_chart, portfolio_html,
-                tv_chart, tv_calendar, as_of):
+                tv_chart, tv_calendar, journal_html, as_of):
     """Assemble every piece into one HTML file and save it."""
     generated = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M")
     bar_label = BAR_LABELS[BAR_COLUMN]
@@ -2161,6 +2363,12 @@ def render_page(rows, risk_rows, yield_data, correlation, bar_html, trend_html,
   <h2>Upcoming US releases</h2>
   {calendar_html}
   <p class="note"><b>Why a calendar belongs here.</b> {EXPLANATIONS['calendar']}</p>
+</section>
+
+<section class="card">
+  <h2>Decision journal</h2>
+  {journal_html}
+  <p class="note"><b>Why calibration, not accuracy.</b> {EXPLANATIONS['journal']}</p>
 </section>
 
 <section class="card">
@@ -2327,6 +2535,15 @@ def main():
     for problem in pricing_problems:
         print(f"POSITIONS: {problem}")
 
+    print("Reading the decision journal...")
+    journal_entries, journal_problems = load_journal()
+    journal_resolved, journal_open = score_journal(
+        journal_entries, datetime.now(TIMEZONE).date())
+    if journal_entries:
+        print(f"  {len(journal_resolved)} settled, {len(journal_open)} open")
+    for problem in journal_problems:
+        print(f"JOURNAL: {problem}")
+
     print("Reading calendar.json...")
     calendar_events, calendar_problems = load_calendar(CALENDAR_PATH)
     for problem in calendar_problems:
@@ -2362,6 +2579,8 @@ def main():
         curve_html=build_curve_chart(curve_series),
         watcher_html=build_watcher_html(composite, scores),
         watcher_chart=build_watcher_chart(composite),
+        journal_html=build_journal_html(journal_entries, journal_resolved,
+                                        journal_open, journal_problems),
         tv_chart=build_tradingview_chart(portfolio_rows),
         tv_calendar=build_tradingview_calendar(),
         portfolio_html=build_portfolio_html(settings, portfolio_rows,

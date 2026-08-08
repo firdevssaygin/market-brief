@@ -1,0 +1,22 @@
+{
+  "_readme": [
+    "YOUR PREDICTIONS. Empty until you write one - nothing here is invented.",
+    "",
+    "Write the call BEFORE you know the answer. Each entry needs:",
+    "  date          YYYY-MM-DD, the day you made the call",
+    "  symbol        Yahoo symbol: AMD, CHZ-USD, SPY, THYAO.IS",
+    "  direction     up or down",
+    "  horizon_days  how many days until it should be judged, e.g. 7 or 30",
+    "  confidence    50 to 100. Fifty is a coin toss. If you would write 30,",
+    "                you believe the opposite at 70 - write that instead.",
+    "  note          why you think so. This is the part you will learn from.",
+    "",
+    "Once the horizon passes the script settles it against the real price move",
+    "and adds it to your calibration table. You cannot edit a settled call into",
+    "being right, which is the entire point.",
+    "",
+    "To keep this in the spreadsheet instead: add a second TAB, publish that tab",
+    "as CSV, and put its link in JOURNAL_CSV_URL in brief.py."
+  ],
+  "entries": []
+}
