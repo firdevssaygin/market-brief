@@ -116,6 +116,17 @@ CALENDAR_EVENTS_SHOWN = 6
 # Google Sheet, so you can edit them from a phone without touching GitHub. If it
 # is left empty, positions.json is used instead. The sheet wins when both exist.
 POSITIONS_PATH = Path(__file__).parent / "positions.json"
+# TradingView writes symbols differently again: it wants an exchange prefix.
+# Yahoo says AMD, TradingView says NASDAQ:AMD; Yahoo says CHZ-USD, and since you
+# trade on OKX the matching TradingView symbol is OKX:CHZUSDT. Anything not
+# listed here falls back to the bare symbol, which TradingView usually resolves
+# on its own. Add an entry if a chart ever shows the wrong instrument.
+TRADINGVIEW_SYMBOLS = {
+    "AMD": "NASDAQ:AMD",
+    "MP": "NYSE:MP",
+    "LITE": "NASDAQ:LITE",
+}
+
 POSITIONS_CSV_URL = (
     "https://docs.google.com/spreadsheets/d/e/2PACX-1vTOB5Zv19hu0C36dJqp4UN5"
     "-V1Y6v2t_vLbzub2mMgqd8RdWh7Tp6KB02aT0gvInl7s0HacypbTzNVA/pub?output=csv"
@@ -308,6 +319,19 @@ EXPLANATIONS = {
         "added up. Profit is against your stated buy price and ignores commission, "
         "spread and tax, so it is the gross figure, not what you would actually "
         "walk away with."
+    ),
+    "tradingview": (
+        "Everything else on this page is computed when the page is built and then "
+        "frozen: open it a week from now with no internet and the numbers are still "
+        "there, exactly as they were. These two panels are different. They are "
+        "TradingView's own code, fetching TradingView's own data in your browser as "
+        "you look at them. "
+        "That is a deliberate trade. It buys intraday movement that a page rebuilt "
+        "every three hours cannot show, and an economic calendar maintained by people "
+        "whose job it is - which is why the hand-written calendar above now carries "
+        "the interpretation rather than the dates. The cost is that these are the only "
+        "parts of the page that depend on someone else's service being up, and the "
+        "only parts that watch you back: TradingView sets its own cookies here."
     ),
     "headlines": (
         "Headline, source, date and link only - no summaries and no article text. "
@@ -1461,6 +1485,10 @@ footer { color: #898781; font-size: 13px; margin-top: 28px; }
 .tile-reading { font-size: 13px; }
 .tile-reading .reading { font-weight: 600; line-height: 1.4; }
 
+/* TradingView widgets */
+.tv-widget { min-height: 480px; }
+.tv-widget iframe { border-radius: 8px; }
+
 /* Portfolio */
 .alt { color: #52514e; }
 .awaiting { color: #52514e; font-size: 14px; background: #f9f9f7; border: 1px dashed #c3c2b7;
@@ -1824,6 +1852,77 @@ def build_portfolio_html(settings, rows, totals, problems):
     return "".join(blocks)
 
 
+def to_tradingview_symbol(symbol, kind):
+    """Turn a Yahoo symbol into the one TradingView expects."""
+    if symbol in TRADINGVIEW_SYMBOLS:
+        return TRADINGVIEW_SYMBOLS[symbol]
+    if symbol.endswith(".IS"):
+        return f"BIST:{symbol[:-3]}"
+    if symbol.endswith("-USD"):
+        # You buy these on OKX, so its own pair is the honest chart to show.
+        return f"OKX:{symbol[:-4]}USDT"
+    return symbol
+
+
+def build_tradingview_chart(rows):
+    """A live TradingView chart, with your holdings as its watchlist.
+
+    Unlike everything else on this page, this is not computed here. It is
+    TradingView's own JavaScript, fetching its own live data in your browser
+    when you open the page. That is the point - it shows intraday movement a
+    once-every-three-hours static page cannot - but it also means this panel is
+    the one part that depends on somebody else's service being up.
+    """
+    watchlist = [to_tradingview_symbol(row["symbol"], row["kind"])
+                 for row in rows if row["kind"] != "cash"]
+    if not watchlist:
+        return "<p class='missing'>No holdings to chart.</p>"
+
+    config = {
+        "symbol": watchlist[0],
+        "watchlist": watchlist,
+        "interval": "D",
+        "timezone": "Europe/Istanbul",
+        "theme": "light",
+        "style": "1",
+        "locale": "en",
+        "hide_side_toolbar": False,
+        "allow_symbol_change": True,
+        "details": True,
+        "width": "100%",
+        "height": 520,
+    }
+    return (
+        "<div class='tv-widget'><div class='tradingview-widget-container'>"
+        "<div class='tradingview-widget-container__widget'></div>"
+        "<script type='text/javascript' "
+        "src='https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js' "
+        f"async>{json.dumps(config)}</script>"
+        "</div></div>"
+    )
+
+
+def build_tradingview_calendar():
+    """TradingView's economic calendar - the authoritative dates."""
+    config = {
+        "colorTheme": "light",
+        "isTransparent": False,
+        "locale": "en",
+        "countryFilter": "us,eu,tr",
+        "importanceFilter": "0,1",
+        "width": "100%",
+        "height": 480,
+    }
+    return (
+        "<div class='tv-widget'><div class='tradingview-widget-container'>"
+        "<div class='tradingview-widget-container__widget'></div>"
+        "<script type='text/javascript' "
+        "src='https://s3.tradingview.com/external-embedding/embed-widget-events.js' "
+        f"async>{json.dumps(config)}</script>"
+        "</div></div>"
+    )
+
+
 def build_headlines_html(feeds):
     """One card per source, each a list of headlines that link out.
 
@@ -1952,7 +2051,8 @@ def build_correlation_hero(correlation):
 
 def render_page(rows, risk_rows, yield_data, correlation, bar_html, trend_html,
                 correlation_html, headlines_html, calendar_html, regime_html,
-                curve_html, watcher_html, watcher_chart, portfolio_html, as_of):
+                curve_html, watcher_html, watcher_chart, portfolio_html,
+                tv_chart, tv_calendar, as_of):
     """Assemble every piece into one HTML file and save it."""
     generated = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M")
     bar_label = BAR_LABELS[BAR_COLUMN]
@@ -2061,6 +2161,17 @@ def render_page(rows, risk_rows, yield_data, correlation, bar_html, trend_html,
   <h2>Upcoming US releases</h2>
   {calendar_html}
   <p class="note"><b>Why a calendar belongs here.</b> {EXPLANATIONS['calendar']}</p>
+</section>
+
+<section class="card">
+  <h2>Live charts &mdash; your holdings</h2>
+  {tv_chart}
+  <p class="note"><b>Why this panel is different.</b> {EXPLANATIONS['tradingview']}</p>
+</section>
+
+<section class="card">
+  <h2>Economic calendar</h2>
+  {tv_calendar}
 </section>
 
 <section class="card">
@@ -2251,6 +2362,8 @@ def main():
         curve_html=build_curve_chart(curve_series),
         watcher_html=build_watcher_html(composite, scores),
         watcher_chart=build_watcher_chart(composite),
+        tv_chart=build_tradingview_chart(portfolio_rows),
+        tv_calendar=build_tradingview_calendar(),
         portfolio_html=build_portfolio_html(settings, portfolio_rows,
                                             portfolio_totals,
                                             position_problems + pricing_problems),
