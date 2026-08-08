@@ -2665,7 +2665,7 @@ def build_top_news_html(feeds, rows, limit=6):
     return "<ul class='ngrid'>" + "".join(cards) + "</ul>"
 
 
-def build_portfolio_chart(totals):
+def build_portfolio_chart(totals, div_id="portfolio-chart", height=330):
     """How the portfolio's value has moved, with range buttons.
 
     Compounding the daily returns gives a growth path; scaling it so the final
@@ -2692,7 +2692,7 @@ def build_portfolio_chart(totals):
     )
     figure.update_layout(
         **{**BASE_LAYOUT, "margin": dict(l=8, r=8, t=34, b=8)},
-        height=330, hovermode="x unified", showlegend=False,
+        height=height, hovermode="x unified", showlegend=False,
         xaxis=dict(
             showgrid=False, tickfont=dict(color=COLOR_MUTED), linecolor=COLOR_GRID,
             # Plotly's own range buttons - no custom widget needed.
@@ -2716,12 +2716,15 @@ def build_portfolio_chart(totals):
     # A fixed div id so the snippet below can find this chart, and rescale the
     # vertical axis whenever a range button changes the dates on view. Without
     # it, a week of movement is squashed flat against a year-sized axis.
+    # The id is a parameter because this chart appears twice - on Home and on
+    # Portfolio. Two elements sharing an id means only one renders, and the
+    # script below would bind to whichever came first.
     chart = figure.to_html(full_html=False, include_plotlyjs=False,
-                           div_id="portfolio-chart",
+                           div_id=div_id,
                            config={"displayModeBar": False, "responsive": True})
     return chart + """
 <script>(function(){
-  var el = document.getElementById('portfolio-chart');
+  var el = document.getElementById('__DIV_ID__');
   if (!el) { return; }
   el.on('plotly_relayout', function(ev){
     // A range button reports xaxis.range as one array; dragging reports the two
@@ -2743,7 +2746,7 @@ def build_portfolio_chart(totals):
     var pad = (max - min) * 0.12 || 1;
     Plotly.relayout(el, {'yaxis.range': [min - pad, max + pad]});
   });
-})();</script>"""
+})();</script>""".replace("__DIV_ID__", div_id)
 
 
 def build_headlines_html(feeds, rows):
@@ -2941,6 +2944,7 @@ def render_page(rows, risk_rows, yield_data, correlation, bar_html, trend_html,
                 correlation_html, headlines_html, calendar_html, regime_html,
                 curve_html, watcher_html, watcher_chart, portfolio_html,
                 tv_chart, tv_calendar, earnings_html, home_summary, portfolio_chart,
+                home_portfolio_chart,
                 top_news, learn_html, as_of):
     """Assemble every piece into one HTML file and save it."""
     generated = datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M")
@@ -2978,6 +2982,11 @@ def render_page(rows, risk_rows, yield_data, correlation, bar_html, trend_html,
 <section class="card">
   <h2>Today at a glance</h2>
   {home_summary}
+</section>
+
+<section class="card">
+  <h2>Your portfolio over time</h2>
+  <div class="chart-scroll">{home_portfolio_chart}</div>
 </section>
 
 <section class="card">
@@ -3284,6 +3293,8 @@ def main():
         tv_chart=build_tradingview_chart(portfolio_rows),
         tv_calendar=build_tradingview_calendar(),
         portfolio_chart=build_portfolio_chart(portfolio_totals),
+        home_portfolio_chart=build_portfolio_chart(
+            portfolio_totals, div_id='home-portfolio-chart', height=280),
         portfolio_html=build_portfolio_html(settings, portfolio_rows,
                                             portfolio_totals,
                                             position_problems + pricing_problems),
