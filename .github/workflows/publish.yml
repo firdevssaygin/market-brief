@@ -35,10 +35,10 @@ jobs:
 
     steps:
       - name: Get the repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.14"
           cache: pip          # remembers downloaded packages, so later runs are quicker
