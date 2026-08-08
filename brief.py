@@ -871,6 +871,12 @@ def fetch_risk_regime(reference_date):
 REQUIRED_POSITION_FIELDS = ["name", "symbol", "quantity", "buy_price"]
 
 
+# Plain cash needs no price feed: a dollar is a dollar. Writing USD or TRY as
+# the symbol books the holding at face value with no download and no volatility,
+# which is both correct and one less thing to go wrong.
+CASH_SYMBOLS = {"USD": "USD", "TRY": "TRY", "CASH": "USD"}
+
+
 def position_currency(symbol):
     """Which currency a Yahoo symbol is priced in.
 
@@ -878,7 +884,10 @@ def position_currency(symbol):
     here is quoted in dollars. Adding the two together without converting would
     produce a total that means nothing at all.
     """
-    return "TRY" if symbol.upper().endswith(".IS") else "USD"
+    upper = symbol.upper()
+    if upper in CASH_SYMBOLS:
+        return CASH_SYMBOLS[upper]
+    return "TRY" if upper.endswith(".IS") else "USD"
 
 
 def parse_number(value):
@@ -1087,6 +1096,22 @@ def build_portfolio(settings, holdings):
     returns_by_name = {}
 
     for holding in holdings:
+        # Cash is booked at face value. No price to fetch, and no daily returns,
+        # so it correctly contributes nothing to portfolio volatility.
+        if holding["symbol"].upper() in CASH_SYMBOLS:
+            amount = holding["quantity"] * 1.0
+            value = to_reporting(amount, holding["currency"])
+            cost = to_reporting(holding["quantity"] * holding["buy_price"],
+                                holding["currency"])
+            if value is None or cost is None:
+                problems.append(f"could not convert {holding['symbol']} into {reporting}")
+                continue
+            rows.append({**holding, "price": 1.0, "cost": cost, "value": value,
+                         "profit": value - cost,
+                         "profit_pct": percent_change(value, cost) if cost else None,
+                         "as_of": date.today()})
+            continue
+
         closes = fetch_closes(holding["symbol"], "1y")
         if closes is None:
             problems.append(f"no price data for {holding['symbol']} - left out of the totals")
