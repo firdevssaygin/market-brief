@@ -1859,6 +1859,35 @@ footer { color: #898781; font-size: 13px; margin-top: 28px; }
 """
 
 
+def build_etf_table(rows, risk_rows):
+    """Prices and statistics for the same six funds, in one table.
+
+    These used to be two tables listing the same six rows - one for prices, one
+    for the statistics computed from them - so reading a fund meant scrolling
+    between two views of the same thing.
+    """
+    lines = []
+    for row, risk in zip(rows, risk_rows):
+        if row is None:
+            continue
+        label, tone = unusualness_label(risk["z_score"]) if risk else ("n/a", "flat")
+        lines.append(
+            "<tr>"
+            f"<td class='tk'>{row['ticker']}</td>"
+            f"<td>{row['close']:.2f}</td>"
+            f"<td class='{change_class(row['change_1d'])}'>{format_change(row['change_1d'])}</td>"
+            f"<td>{format_signed(risk['z_score']) if risk else 'n/a'}</td>"
+            f"<td><span class='tag {tone}'>{label}</span></td>"
+            f"<td class='{change_class(row['change_1w'])}'>{format_change(row['change_1w'])}</td>"
+            f"<td class='{change_class(row['change_ytd'])}'>{format_change(row['change_ytd'])}</td>"
+            f"<td>{format_number(risk['volatility'], 1, '%') if risk else 'n/a'}</td>"
+            f"<td>{format_number(risk['volatility_percentile'], 0, 'th') if risk else 'n/a'}</td>"
+            f"<td class='{'flat' if risk and risk['drawdown'] > -0.05 else 'down'}'>"
+            f"{format_number(risk['drawdown'], 1, '%') if risk else 'n/a'}</td>"
+            "</tr>")
+    return "\n".join(lines) or "<tr><td class='missing'>No data available.</td></tr>"
+
+
 def build_table(rows):
     """The plain price table."""
     lines = []
@@ -2919,6 +2948,7 @@ def build_correlation_hero(correlation):
 
 
 def render_page(rows, risk_rows, yield_data, correlation, bar_html, trend_html,
+                etf_table, yield_card, correlation_hero,
                 correlation_html, headlines_html, calendar_html, regime_html,
                 curve_html, watcher_html, watcher_chart, portfolio_html,
                 tv_chart, tv_calendar, earnings_html, home_summary,
@@ -2979,69 +3009,40 @@ def render_page(rows, risk_rows, yield_data, correlation, bar_html, trend_html,
 </div><div class="panel" id="panel-market">
 
 <section class="card">
-  <h2>Risk watcher</h2>
+  <h2>Market risk</h2>
   {watcher_html}
   <div class="chart-scroll">{watcher_chart}</div>
-</section>
-
-<section class="card">
-  <h2>What kind of market is this?</h2>
+  <h3 class="sub">The four indicators behind it</h3>
   {regime_html}
 </section>
 
 <section class="card">
-  <h2>Yield curve: 10-year minus 3-month</h2>
+  <h2>Rates</h2>
+  {yield_card}
+  <h3 class="sub">Yield curve: 10-year minus 3-month</h3>
   <div class="chart-scroll">{curve_html}</div>
-</section>
-
-<section class="card">
-  <h2>Was today unusual?</h2>
-  <div class="table-scroll">
-  <table>
-    <thead>
-      <tr><th>Fund</th><th>1-day</th><th>Z-score</th><th></th>
-          <th>Volatility ({VOL_WINDOW}d, ann.)</th><th>Vol percentile (1y)</th>
-          <th>From 52w high</th></tr>
-    </thead>
-    <tbody>
-{build_risk_table(risk_rows)}
-    </tbody>
-  </table>
-  </div>
-</section>
-
-<section class="card">
-  <h2>Do yields still move {YIELD_PAIR_TICKER}?</h2>
-  {build_correlation_hero(correlation)}
+  <h3 class="sub">Do yields still move {YIELD_PAIR_TICKER}?</h3>
+  {correlation_hero}
   <div class="chart-scroll">{correlation_html}</div>
 </section>
 
 <section class="card">
-  <h2>US 10-year Treasury yield</h2>
-  {build_yield_card(yield_data)}
-</section>
-
-<section class="card">
-  <h2>ETF closes and returns</h2>
+  <h2>ETFs</h2>
   <div class="table-scroll">
   <table>
     <thead>
-      <tr><th>Fund</th><th>Close</th><th>1-day</th><th>1-week</th><th>YTD</th></tr>
+      <tr><th>Fund</th><th>Close</th><th>1-day</th><th>Z</th><th></th>
+          <th>1-week</th><th>YTD</th><th>Vol ({VOL_WINDOW}d)</th>
+          <th>Vol %ile</th><th>From 52w high</th></tr>
     </thead>
     <tbody>
-{build_table(rows)}
+{etf_table}
     </tbody>
   </table>
   </div>
-</section>
-
-<section class="card">
-  <h2>{bar_label} move by fund</h2>
+  <h3 class="sub">{bar_label} move by fund</h3>
   <div class="chart-scroll">{bar_html}</div>
-</section>
-
-<section class="card">
-  <h2>{" vs ".join(TREND_TICKERS)} &mdash; last {TREND_DAYS} days, rebased to 100</h2>
+  <h3 class="sub">{" vs ".join(TREND_TICKERS)} &mdash; last {TREND_DAYS} days, rebased to 100</h3>
   <div class="chart-scroll">{trend_html}</div>
 </section>
 
@@ -3272,6 +3273,9 @@ def main():
         bar_html=build_bar_chart(dated),
         trend_html=build_trend_chart(rebased_trend(rows, TREND_TICKERS, TREND_DAYS)),
         correlation_html=build_correlation_chart(correlation),
+        etf_table=build_etf_table(rows, risk_rows),
+        yield_card=build_yield_card(yield_data),
+        correlation_hero=build_correlation_hero(correlation),
         headlines_html=build_headlines_html(feeds, portfolio_rows),
         calendar_html=build_calendar_html(calendar_events, calendar_problems),
         regime_html=build_regime_html(regime),
