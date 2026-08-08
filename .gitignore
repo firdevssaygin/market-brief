@@ -11,3 +11,9 @@ __pycache__/
 # requirements.txt instead, so there is no reason to store them.
 .venv/
 venv/
+
+# The generated page. It is built fresh on every run and handed straight to
+# GitHub Pages, so there is no reason to store it here - and storing it was what
+# used to make the robot and your laptop disagree about who had the newer copy.
+# Running the script locally still creates it for you to open in a browser.
+docs/

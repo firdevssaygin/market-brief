@@ -3,6 +3,14 @@
 # This file must live at exactly .github/workflows/ - GitHub only looks there.
 # The format is YAML, where indentation carries meaning: the number of spaces at
 # the start of a line decides what belongs to what. Use spaces, never tabs.
+#
+# HOW PUBLISHING WORKS HERE
+# The rebuilt page is handed straight to GitHub Pages as a parcel and never
+# committed back into the repository. That matters: if the robot committed the
+# page every morning, your laptop's copy would fall behind overnight and every
+# push from your machine would be rejected until you pulled first. Because
+# nothing is written back, the repository only ever contains what you wrote, and
+# your laptop can never fall behind.
 
 name: Publish market brief
 
@@ -23,15 +31,27 @@ on:
   # yourself instead of waiting until tomorrow morning.
   workflow_dispatch:
 
-# By default a job may only read the repository. Writing the rebuilt page back
-# requires asking for permission explicitly.
+# What this job is allowed to do. It only needs to READ the repository now,
+# because it no longer writes anything back. The other two permissions let it
+# hand the finished page to GitHub Pages.
 permissions:
-  contents: write
+  contents: read
+  pages: write
+  id-token: write
+
+# If a scheduled run and a manual run overlap, let them queue rather than fight.
+concurrency:
+  group: pages
+  cancel-in-progress: false
 
 jobs:
   publish:
     # A fresh, empty Linux machine, created for this run and destroyed after.
     runs-on: ubuntu-latest
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
       - name: Get the repository
@@ -48,19 +68,20 @@ jobs:
 
       # If brief.py fails - for instance every price download returns nothing -
       # it exits with an error, this step goes red, and the steps below never
-      # run. Yesterday's good page stays published rather than being replaced
+      # run. The previously published page stays up rather than being replaced
       # by a broken one.
       - name: Build the page
         run: python brief.py
 
-      - name: Publish it, if anything changed
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/index.html
-          if git diff --staged --quiet; then
-            echo "The page is identical to the published one - nothing to do."
-          else
-            git commit -m "Update market brief for $(date -u +'%Y-%m-%d')"
-            git push
-          fi
+      - name: Prepare Pages
+        uses: actions/configure-pages@v6
+
+      # Wraps the docs folder into a parcel for Pages to collect.
+      - name: Parcel up the page
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: docs
+
+      - name: Publish to the website
+        id: deployment
+        uses: actions/deploy-pages@v5
