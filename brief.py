@@ -793,9 +793,6 @@ def load_positions(path):
             "currency": position_currency(str(entry["symbol"])),
         })
 
-    if not holdings and not problems:
-        problems.append("positions.json has no holdings in it yet.")
-
     return settings, holdings, problems
 
 
@@ -1323,6 +1320,8 @@ footer { color: #898781; font-size: 13px; margin-top: 28px; }
 .tile-reading .reading { font-weight: 600; line-height: 1.4; }
 
 /* Portfolio */
+.awaiting { color: #52514e; font-size: 14px; background: #f9f9f7; border: 1px dashed #c3c2b7;
+            border-radius: 8px; padding: 16px 18px; margin: 0; }
 .sym { color: #898781; font-size: 13px; }
 .sub { font-size: 14px; margin: 24px 0 10px; color: #52514e; font-weight: 600; }
 .corr td { text-align: center; font-variant-numeric: tabular-nums; font-size: 13px; }
@@ -1574,7 +1573,13 @@ def build_portfolio_html(settings, rows, totals, problems):
                       f"<ul>{listed}</ul></div>")
 
     if not rows:
-        blocks.append("<p class='missing'>No holdings could be priced.</p>")
+        blocks.append(
+            "<p class='awaiting'><b>No holdings recorded yet.</b> A watchlist says what "
+            "you are watching; it does not say how much you own or what you paid, and "
+            "neither of those can be inferred from a price. Add quantity, purchase date "
+            "and purchase price to positions.json and every figure here - value, profit, "
+            "weights, portfolio volatility, correlations - will be computed from them.</p>"
+        )
         return "".join(blocks)
 
     currency = totals["currency"]

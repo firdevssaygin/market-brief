@@ -1,12 +1,12 @@
 {
   "_readme": [
-    "YOUR HOLDINGS. This is the file you edit. Save it and the dashboard rebuilds",
-    "itself within about a minute.",
+    "YOUR HOLDINGS. Empty on purpose - nothing here is invented.",
     "",
-    "THE SYMBOLS ARE YOURS - taken from your TradingView Portfolio list and checked",
-    "against Yahoo. THE QUANTITIES AND BUY PRICES ARE PLACEHOLDERS. While",
-    "'is_example' is true the dashboard shows an orange banner saying so. Put in",
-    "your real numbers, set is_example to false, and the banner disappears.",
+    "The symbols below in _watchlist are the ones from your TradingView Portfolio",
+    "list, already checked against Yahoo. They are NOT holdings: a watchlist says",
+    "what you are watching, not what you own, how much of it, or what you paid.",
+    "Until quantity, buy_date and buy_price come from you, no portfolio figure can",
+    "be computed, and the dashboard will say so rather than show a number.",
     "",
     "SYMBOL MAPPING - TradingView writes these differently from Yahoo:",
     "  TradingView   ->  Yahoo        what it is",
@@ -16,84 +16,31 @@
     "  CHZUSDT       ->  CHZ-USD      crypto: USDT pairs become -USD",
     "  INJUSDT       ->  INJ-USD      crypto",
     "  XAUUSD        ->  GC=F         gold. Yahoo has no spot gold feed, so this is",
-    "                                 the futures price - normally a few dollars",
-    "                                 above spot. Use GLD instead if you hold the ETF.",
+    "                                 the futures price, normally a few dollars",
+    "                                 above spot. Use GLD if you hold the ETF.",
     "  BIST:THYAO    ->  THYAO.IS     Borsa Istanbul, if you add Turkish shares",
     "",
-    "EACH HOLDING NEEDS:",
-    "  name       - whatever you want to call it",
-    "  symbol     - the YAHOO symbol. The only field that must be exact.",
-    "  quantity   - how many shares or coins. Decimals are fine for crypto.",
-    "  buy_date   - YYYY-MM-DD, the day you bought",
-    "  buy_price  - what you paid PER SHARE OR COIN, in that market's own currency",
-    "  where      - free text, a note to yourself",
+    "TO ADD A HOLDING, copy this shape into the positions list:",
+    "  {",
+    "    \"name\": \"AMD\",",
+    "    \"symbol\": \"AMD\",",
+    "    \"quantity\": 0,",
+    "    \"buy_date\": \"2026-01-01\",",
+    "    \"buy_price\": 0,",
+    "    \"where\": \"Midas\"",
+    "  }",
+    "buy_price is what you paid PER SHARE OR COIN, in that market's own currency:",
+    "dollars for AMD and CHZ-USD, lira for anything ending .IS. Mixed currencies are",
+    "converted at the live USD/TRY rate before being added up.",
     "",
-    "CURRENCY: .IS symbols are priced in lira, everything else in dollars. They are",
-    "converted at the live USD/TRY rate before anything is added up, because adding",
-    "lira to dollars would produce a meaningless total. Set reporting_currency to",
-    "\"USD\" or \"TRY\" - it changes how totals are shown, never what you own.",
-    "",
-    "TO EDIT WITHOUT THE TERMINAL:",
-    "  1. Open https://github.com/firdevssaygin/market-brief",
-    "  2. Click positions.json, then the pencil icon",
-    "  3. Change the numbers, scroll down, click 'Commit changes'",
-    "  4. Wait about a minute and reload your dashboard",
-    "Adding and removing holdings works the same way. If you break the formatting -",
-    "a missing comma is the usual one - the dashboard tells you which line rather",
-    "than silently showing wrong figures."
+    "reporting_currency is \"USD\" or \"TRY\" - it changes how totals are displayed,",
+    "never what you own."
   ],
 
-  "is_example": true,
+  "is_example": false,
   "reporting_currency": "USD",
 
-  "positions": [
-    {
-      "name": "AMD",
-      "symbol": "AMD",
-      "quantity": 10,
-      "buy_date": "2026-02-10",
-      "buy_price": 400.00,
-      "where": "Midas - PLACEHOLDER, replace"
-    },
-    {
-      "name": "MP Materials",
-      "symbol": "MP",
-      "quantity": 100,
-      "buy_date": "2026-03-05",
-      "buy_price": 45.00,
-      "where": "Midas - PLACEHOLDER, replace"
-    },
-    {
-      "name": "Lumentum",
-      "symbol": "LITE",
-      "quantity": 5,
-      "buy_date": "2026-01-15",
-      "buy_price": 700.00,
-      "where": "Midas - PLACEHOLDER, replace"
-    },
-    {
-      "name": "Chiliz",
-      "symbol": "CHZ-USD",
-      "quantity": 50000,
-      "buy_date": "2026-04-02",
-      "buy_price": 0.0125,
-      "where": "OKX - PLACEHOLDER, replace"
-    },
-    {
-      "name": "Injective",
-      "symbol": "INJ-USD",
-      "quantity": 200,
-      "buy_date": "2026-05-11",
-      "buy_price": 5.20,
-      "where": "OKX - PLACEHOLDER, replace"
-    },
-    {
-      "name": "Gold",
-      "symbol": "GC=F",
-      "quantity": 2,
-      "buy_date": "2025-11-20",
-      "buy_price": 3900.00,
-      "where": "PLACEHOLDER, replace"
-    }
-  ]
+  "_watchlist": ["AMD", "MP", "LITE", "CHZ-USD", "INJ-USD", "GC=F"],
+
+  "positions": []
 }
