@@ -941,6 +941,16 @@ def build_portfolio(settings, holdings):
             return None
         return amount * usd_try if currency == "USD" else amount / usd_try
 
+    # The other currency, so every figure can be shown in both. Current values
+    # convert cleanly at today's rate; the cost basis is already dollar-native,
+    # so nothing here rests on a historical exchange rate.
+    other = "TRY" if reporting == "USD" else "USD"
+
+    def to_other(amount):
+        if usd_try is None or amount is None:
+            return None
+        return amount * usd_try if reporting == "USD" else amount / usd_try
+
     rows = []
     returns_by_name = {}
 
@@ -971,6 +981,8 @@ def build_portfolio(settings, holdings):
             "value": value,
             "profit": value - cost,
             "profit_pct": percent_change(value, cost) if cost else None,
+            "value_other": to_other(value),
+            "profit_other": to_other(value - cost),
             "as_of": closes.index[-1].date(),
         })
 
@@ -992,6 +1004,9 @@ def build_portfolio(settings, holdings):
         "profit_pct": percent_change(total_value, total_cost) if total_cost else None,
         "currency": reporting,
         "usd_try": usd_try,
+        "other_currency": other,
+        "value_other": to_other(total_value),
+        "profit_other": to_other(total_value - total_cost),
         "top_three": sum(row["weight"] for row in rows[:3]),
         "count": len(rows),
     }
@@ -1444,6 +1459,7 @@ footer { color: #898781; font-size: 13px; margin-top: 28px; }
 .tile-reading .reading { font-weight: 600; line-height: 1.4; }
 
 /* Portfolio */
+.alt { color: #52514e; }
 .awaiting { color: #52514e; font-size: 14px; background: #f9f9f7; border: 1px dashed #c3c2b7;
             border-radius: 8px; padding: 16px 18px; margin: 0; }
 .sym { color: #898781; font-size: 13px; }
@@ -1716,6 +1732,9 @@ def build_portfolio_html(settings, rows, totals, problems):
         f"<b class='{change_class(totals['profit'])}'>"
         f"{'+' if totals['profit'] >= 0 else '-'}{money(abs(totals['profit']), currency)} "
         f"({format_change(totals['profit_pct'])})</b> since purchase<br>"
+        f"= {money(totals['value_other'], totals['other_currency'])} &nbsp;·&nbsp; "
+        f"{'+' if totals['profit'] >= 0 else '-'}"
+        f"{money(abs(totals['profit_other']), totals['other_currency'])}<br>"
         f"{totals['count']} holdings &nbsp;·&nbsp; top three are "
         f"{totals['top_three']:.0f}% of the total"
         + (f" &nbsp;·&nbsp; USD/TRY {totals['usd_try']:.2f}" if totals.get("usd_try") else "")
@@ -1733,6 +1752,7 @@ def build_portfolio_html(settings, rows, totals, problems):
             f"<td>{row['buy_price']:,.4f}".rstrip("0").rstrip(".") + "</td>"
             f"<td>{row['price']:,.4f}".rstrip("0").rstrip(".") + "</td>"
             f"<td>{money(row['value'], currency)}</td>"
+            f"<td class='alt'>{money(row['value_other'], totals['other_currency'])}</td>"
             f"<td class='{change_class(row['profit'])}'>"
             f"{'+' if row['profit'] >= 0 else '-'}{money(abs(row['profit']), currency)}</td>"
             f"<td class='{change_class(row['profit_pct'])}'>{format_change(row['profit_pct'])}</td>"
@@ -1743,7 +1763,9 @@ def build_portfolio_html(settings, rows, totals, problems):
     blocks.append(
         "<div class='table-scroll'><table><thead><tr>"
         "<th>Holding</th><th>Symbol</th><th>Qty</th><th>Bought at</th><th>Now</th>"
-        f"<th>Value</th><th>Profit</th><th>%</th><th>Weight</th>"
+        f"<th>Value ({'$' if currency == 'USD' else '₺'})</th>"
+        f"<th>Value ({'₺' if currency == 'USD' else '$'})</th>"
+        f"<th>Profit</th><th>%</th><th>Weight</th>"
         "</tr></thead><tbody>" + "".join(body) + "</tbody></table></div>"
     )
 
